@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+{% block title %}配置 - Travel Guide Generator{% endblock %}
+{% block body_class %}config-page{% endblock %}
+{% block content %}
+<div class="config-container">
+    <h2>LLM 配置</h2>
+    
+    <div class="config-section">
+        <h3>TravelPlanner (行程规划师)</h3>
+        <div class="form-group">
+            <label>Provider</label>
+            <select id="plannerProvider">
+                <option value="openai">OpenAI</option>
+                <option value="openai-compatible">OpenAI Compatible (DeepSeek/Qwen)</option>
+                <option value="anthropic">Anthropic</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label>Model</label>
+            <input type="text" id="plannerModel" value="gpt-4o" placeholder="gpt-4o / deepseek-chat / claude-3-sonnet">
+        </div>
+        <div class="form-group">
+            <label>API Key</label>
+            <input type="password" id="plannerApiKey" placeholder="sk-...">
+        </div>
+        <div class="form-group">
+            <label>API Base (可选)</label>
+            <input type="text" id="plannerApiBase" placeholder="https://api.openai.com/v1">
+        </div>
+        <div class="form-group">
+            <label>Temperature</label>
+            <input type="range" id="plannerTemp" min="0" max="1" step="0.1" value="0.7">
+            <span class="temp-value" id="plannerTempValue">0.7</span>
+        </div>
+        <div class="form-group">
+            <label class="flex-label">
+                <input type="checkbox" id="plannerThinkingEnabled" checked>
+                启用思考模式 (DeepSeek V4)
+            </label>
+        </div>
+        <div class="form-group">
+            <label>思考强度</label>
+            <select id="plannerReasoningEffort">
+                <option value="high">high</option>
+                <option value="max">max</option>
+            </select>
+        </div>
+    </div>
+
+    <div class="config-section">
+        <h3>TravelChecker (攻略检查师)</h3>
+        <div class="form-group">
+            <label>Provider</label>
+            <select id="checkerProvider">
+                <option value="openai">OpenAI</option>
+                <option value="openai-compatible">OpenAI Compatible (DeepSeek/Qwen)</option>
+                <option value="anthropic">Anthropic</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label>Model</label>
+            <input type="text" id="checkerModel" value="gpt-4o-mini" placeholder="gpt-4o-mini / deepseek-chat / claude-3-haiku">
+        </div>
+        <div class="form-group">
+            <label>API Key</label>
+            <input type="password" id="checkerApiKey" placeholder="sk-...">
+        </div>
+        <div class="form-group">
+            <label>API Base (可选)</label>
+            <input type="text" id="checkerApiBase" placeholder="https://api.openai.com/v1">
+        </div>
+        <div class="form-group">
+            <label>Temperature</label>
+            <input type="range" id="checkerTemp" min="0" max="1" step="0.1" value="0.3">
+            <span class="temp-value" id="checkerTempValue">0.3</span>
+        </div>
+        <div class="form-group">
+            <label class="flex-label">
+                <input type="checkbox" id="checkerThinkingEnabled" checked>
+                启用思考模式 (DeepSeek V4)
+            </label>
+        </div>
+        <div class="form-group">
+            <label>思考强度</label>
+            <select id="checkerReasoningEffort">
+                <option value="high">high</option>
+                <option value="max">max</option>
+            </select>
+        </div>
+    </div>
+
+    <button class="save-btn" onclick="saveConfig()">保存配置</button>
+</div>
+{% endblock %}

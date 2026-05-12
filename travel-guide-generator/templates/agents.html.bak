@@ -1,0 +1,653 @@
+{% extends "base.html" %}
+{% block title %}智能体管理 - Travel Guide Generator{% endblock %}
+{% block body_class %}agents-page{% endblock %}
+{% block content %}
+<div class="agents-layout">
+  <!-- Sidebar: Agent List -->
+  <aside class="agents-sidebar">
+    <div class="sidebar-header">
+      <h3>智能体列表</h3>
+      <button class="new-agent-btn" onclick="showCreateAgentModal()">+ 新建</button>
+    </div>
+    <div class="agent-list" id="agentList">
+      <div class="agent-item skeleton">
+        <div class="agent-icon">🤖</div>
+        <div class="agent-info">
+          <div class="agent-name">加载中...</div>
+          <div class="agent-role">orchestrator</div>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Main: Agent Detail + Prompt Editor -->
+  <main class="agents-main" id="agentDetail">
+    <div class="detail-empty">
+      <div class="empty-icon">🤖</div>
+      <div class="empty-title">选择一个智能体查看详情</div>
+      <div class="empty-desc">或点击左侧"新建"创建新的智能体</div>
+    </div>
+  </main>
+</div>
+
+<!-- Create Agent Modal -->
+<div class="modal-overlay" id="createAgentModal" style="display:none;">
+  <div class="modal">
+    <div class="modal-header">
+      <h3>新建智能体</h3>
+      <button class="modal-close" onclick="hideCreateAgentModal()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label>标识名（唯一，小写下划线）</label>
+        <input type="text" id="newAgentName" placeholder="food_expert">
+      </div>
+      <div class="form-group">
+        <label>显示名称</label>
+        <input type="text" id="newAgentDisplayName" placeholder="美食专家">
+      </div>
+      <div class="form-group">
+        <label>角色类型</label>
+        <select id="newAgentRoleType">
+          <option value="expert">专家 (expert)</option>
+          <option value="checker">检查员 (checker)</option>
+          <option value="orchestrator">编排器 (orchestrator)</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>描述</label>
+        <textarea id="newAgentDescription" rows="2" placeholder="该智能体的职责描述..."></textarea>
+      </div>
+      <div class="form-group">
+        <button class="btn-secondary" type="button" onclick="generatePromptPreview()" id="genPromptBtn">
+          AI 生成 Prompt
+        </button>
+      </div>
+      <div id="promptPreviewArea" style="display:none; margin-bottom:16px;">
+        <div class="prompt-preview-mini">
+          <div class="preview-mini-header">Role 层（角色定义）</div>
+          <pre id="previewRoleContent"></pre>
+        </div>
+        <div class="prompt-preview-mini">
+          <div class="preview-mini-header">Format 层（输出格式）</div>
+          <pre id="previewFormatContent"></pre>
+        </div>
+        <div class="prompt-preview-mini">
+          <div class="preview-mini-header">变量声明</div>
+          <pre id="previewVariables"></pre>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>图标</label>
+        <input type="text" id="newAgentIcon" placeholder="🍜" value="🤖">
+      </div>
+      <div class="form-group">
+        <label class="flex-label">
+          <input type="checkbox" id="newAgentUseCustomModel" onchange="toggleModelConfig()">
+          使用自定义模型配置（不勾选则使用全局 Planner 配置）
+        </label>
+      </div>
+      <div id="newAgentModelConfig" style="display:none;">
+        <div class="form-group">
+          <label>Provider</label>
+          <select id="newAgentProvider">
+            <option value="openai">OpenAI</option>
+            <option value="openai-compatible">OpenAI Compatible (DeepSeek/Qwen)</option>
+            <option value="anthropic">Anthropic</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Model</label>
+          <input type="text" id="newAgentModel" placeholder="gpt-4o / deepseek-chat / claude-3-sonnet">
+        </div>
+        <div class="form-group">
+          <label>API Key</label>
+          <input type="password" id="newAgentApiKey" placeholder="sk-...">
+        </div>
+        <div class="form-group">
+          <label>API Base（可选）</label>
+          <input type="text" id="newAgentApiBase" placeholder="https://api.openai.com/v1">
+        </div>
+        <div class="form-group">
+          <label>Temperature</label>
+          <input type="range" id="newAgentTemp" min="0" max="1" step="0.1" value="0.7">
+          <span class="temp-value" id="newAgentTempValue">0.7</span>
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-secondary" onclick="hideCreateAgentModal()">取消</button>
+      <button class="btn-primary" onclick="createAgent()">创建</button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+let currentAgent = null;
+let allAgents = [];
+
+async function loadAgents() {
+  try {
+    const res = await fetch('/api/agents');
+    allAgents = await res.json();
+    renderAgentList();
+    if (allAgents.length > 0 && !currentAgent) {
+      selectAgent(allAgents[0].name);
+    }
+  } catch (e) {
+    toast('加载智能体列表失败', 'error');
+  }
+}
+
+function renderAgentList() {
+  const container = document.getElementById('agentList');
+  container.innerHTML = '';
+  allAgents.forEach(agent => {
+    const div = document.createElement('div');
+    div.className = 'agent-item' + (currentAgent?.name === agent.name ? ' active' : '');
+    div.onclick = () => selectAgent(agent.name);
+    div.innerHTML = `
+      <div class="agent-icon">${agent.icon || '🤖'}</div>
+      <div class="agent-info">
+        <div class="agent-name">${agent.display_name}</div>
+        <div class="agent-role">${agent.role_type}</div>
+      </div>
+      <div class="agent-status ${agent.is_active ? 'active' : 'inactive'}"></div>
+    `;
+    container.appendChild(div);
+  });
+}
+
+async function selectAgent(name) {
+  currentAgent = allAgents.find(a => a.name === name);
+  renderAgentList();
+  if (!currentAgent) return;
+
+  try {
+    const [agentRes, promptsRes] = await Promise.all([
+      fetch(`/api/agents/${name}`),
+      fetch(`/api/agents/${name}/prompts`)
+    ]);
+    const agent = await agentRes.json();
+    const prompts = await promptsRes.json();
+    renderAgentDetail(agent, prompts);
+  } catch (e) {
+    toast('加载智能体详情失败', 'error');
+  }
+}
+
+function renderAgentDetail(agent, prompts) {
+  const container = document.getElementById('agentDetail');
+
+  // Group prompts by layer
+  const promptsByLayer = { core: null, role: null, format: null };
+  prompts.forEach(p => { promptsByLayer[p.layer] = p; });
+
+  container.innerHTML = `
+    <div class="detail-header">
+      <div class="detail-title">
+        <span class="detail-icon">${agent.icon || '🤖'}</span>
+        <span>${agent.display_name}</span>
+        <span class="detail-badge">${agent.role_type}</span>
+      </div>
+      <div class="detail-actions">
+        <button class="btn-icon" onclick="deleteAgent('${agent.name}')" title="删除">🗑️</button>
+      </div>
+    </div>
+
+    <div class="detail-body">
+      <!-- Basic Info -->
+      <div class="detail-section">
+        <h4>基本信息</h4>
+        <div class="form-row">
+          <div class="form-group">
+            <label>显示名称</label>
+            <input type="text" id="editDisplayName" value="${agent.display_name || ''}">
+          </div>
+          <div class="form-group">
+            <label>标识名</label>
+            <input type="text" value="${agent.name}" disabled>
+          </div>
+        </div>
+        <div class="form-group">
+          <label>描述</label>
+          <textarea id="editDescription" rows="2">${agent.description || ''}</textarea>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>图标</label>
+            <input type="text" id="editIcon" value="${agent.icon || '🤖'}">
+          </div>
+          <div class="form-group">
+            <label>状态</label>
+            <select id="editIsActive">
+              <option value="true" ${agent.is_active ? 'selected' : ''}>启用</option>
+              <option value="false" ${!agent.is_active ? 'selected' : ''}>禁用</option>
+            </select>
+          </div>
+        </div>
+        <button class="btn-primary" onclick="updateAgent('${agent.name}')">保存基本信息</button>
+      </div>
+
+      <!-- Model Config -->
+      <div class="detail-section">
+        <h4>模型配置</h4>
+        <div id="modelConfigSection">
+          <div class="form-group">
+            <label class="flex-label">
+              <input type="checkbox" id="editUseCustomModel" onchange="toggleEditModelConfig()" ${agent.llm_config && Object.keys(agent.llm_config).length > 0 ? 'checked' : ''}>
+              使用自定义模型配置
+            </label>
+          </div>
+          <div id="editModelConfigFields" style="display:${agent.llm_config && Object.keys(agent.llm_config).length > 0 ? 'block' : 'none'};">
+            <div class="form-row">
+              <div class="form-group">
+                <label>Provider</label>
+                <select id="editAgentProvider">
+                  <option value="openai" ${(agent.llm_config?.provider === 'openai') ? 'selected' : ''}>OpenAI</option>
+                  <option value="openai-compatible" ${(agent.llm_config?.provider === 'openai-compatible') ? 'selected' : ''}>OpenAI Compatible</option>
+                  <option value="anthropic" ${(agent.llm_config?.provider === 'anthropic') ? 'selected' : ''}>Anthropic</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>Model</label>
+                <input type="text" id="editAgentModel" value="${agent.llm_config?.model || ''}" placeholder="gpt-4o">
+              </div>
+            </div>
+            <div class="form-group">
+              <label>API Key</label>
+              <input type="password" id="editAgentApiKey" value="${agent.llm_config?.api_key || ''}" placeholder="sk-...">
+            </div>
+            <div class="form-group">
+              <label>API Base（可选）</label>
+              <input type="text" id="editAgentApiBase" value="${agent.llm_config?.api_base || ''}" placeholder="https://api.openai.com/v1">
+            </div>
+            <div class="form-group">
+              <label>Temperature</label>
+              <input type="range" id="editAgentTemp" min="0" max="1" step="0.1" value="${agent.llm_config?.temperature ?? 0.7}">
+              <span class="temp-value" id="editAgentTempValue">${agent.llm_config?.temperature ?? 0.7}</span>
+            </div>
+          </div>
+          <div class="prompt-actions">
+            <button class="btn-primary" onclick="saveModelConfig('${agent.name}')">保存模型配置</button>
+            <button class="btn-secondary" onclick="testAgentConnection('${agent.name}')">测试连接</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Prompt Editor -->
+      <div class="detail-section">
+        <h4>Prompt 模板</h4>
+        <div class="prompt-tabs">
+          <button class="prompt-tab active" data-layer="core" onclick="switchPromptTab('core')">
+            核心约束 ${promptsByLayer.core ? '✓' : '✗'}
+          </button>
+          <button class="prompt-tab" data-layer="role" onclick="switchPromptTab('role')">
+            角色描述 ${promptsByLayer.role ? '✓' : '✗'}
+          </button>
+          <button class="prompt-tab" data-layer="format" onclick="switchPromptTab('format')">
+            格式模板 ${promptsByLayer.format ? '✓' : '✗'}
+          </button>
+        </div>
+
+        <div class="prompt-panels">
+          ${renderPromptPanel('core', promptsByLayer.core, agent.name)}
+          ${renderPromptPanel('role', promptsByLayer.role, agent.name)}
+          ${renderPromptPanel('format', promptsByLayer.format, agent.name)}
+        </div>
+      </div>
+    </div>
+  `;
+
+  // Show core tab by default
+  switchPromptTab('core');
+}
+
+function renderPromptPanel(layer, prompt, agentName) {
+  const isEditable = prompt ? prompt.is_editable : (layer !== 'core');
+  const content = prompt ? prompt.content : '';
+  const variables = prompt ? JSON.stringify(prompt.variables || [], null, 2) : '[]';
+  const templateId = prompt ? prompt.id : '';
+
+  return `
+    <div class="prompt-panel" data-layer="${layer}" style="display:none;">
+      <div class="prompt-meta">
+        <span class="prompt-layer-badge ${layer}">${layer}</span>
+        <span class="prompt-editable ${isEditable ? 'yes' : 'no'}">${isEditable ? '可编辑' : '只读'}</span>
+        ${prompt ? `<span class="prompt-version">v${prompt.version}</span>` : ''}
+      </div>
+      <div class="form-group">
+        <label>模板内容</label>
+        <textarea id="promptContent_${layer}" rows="12" ${!isEditable ? 'disabled' : ''}>${content}</textarea>
+      </div>
+      <div class="form-group">
+        <label>变量声明 (JSON)</label>
+        <textarea id="promptVars_${layer}" rows="4" ${!isEditable ? 'disabled' : ''}>${variables}</textarea>
+      </div>
+      <div class="prompt-actions">
+        ${isEditable ? `<button class="btn-primary" onclick="savePrompt('${agentName}', '${layer}', ${templateId || 'null'})">保存</button>` : '<span class="hint">该层不可编辑</span>'}
+        <button class="btn-secondary" onclick="previewPrompt('${agentName}', '${layer}')">预览渲染</button>
+      </div>
+      <div class="prompt-preview" id="preview_${layer}" style="display:none;">
+        <div class="preview-header">渲染结果</div>
+        <pre class="preview-content"></pre>
+      </div>
+    </div>
+  `;
+}
+
+function switchPromptTab(layer) {
+  document.querySelectorAll('.prompt-tab').forEach(t => t.classList.toggle('active', t.dataset.layer === layer));
+  document.querySelectorAll('.prompt-panel').forEach(p => p.style.display = p.dataset.layer === layer ? 'block' : 'none');
+}
+
+async function savePrompt(agentName, layer, templateId) {
+  const content = document.getElementById(`promptContent_${layer}`).value;
+  let variables = [];
+  try {
+    variables = JSON.parse(document.getElementById(`promptVars_${layer}`).value);
+  } catch (e) {
+    toast('变量声明 JSON 格式错误', 'error');
+    return;
+  }
+
+  const payload = { layer, name: 'system_prompt', content, variables };
+  const url = templateId ? `/api/agents/${agentName}/prompts/${templateId}` : `/api/agents/${agentName}/prompts`;
+  const method = templateId ? 'PUT' : 'POST';
+
+  try {
+    const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    const data = await res.json();
+    if (res.ok) {
+      toast('保存成功', 'success');
+      selectAgent(agentName);
+    } else {
+      toast(data.error || '保存失败', 'error');
+    }
+  } catch (e) {
+    toast('保存失败', 'error');
+  }
+}
+
+async function previewPrompt(agentName, layer) {
+  const content = document.getElementById(`promptContent_${layer}`).value;
+  // Extract variables from content
+  const matches = content.match(/\{\{(\s*\w+\s*)\}\}/g) || [];
+  const vars = {};
+  matches.forEach(m => {
+    const key = m.replace(/\{\{|\}\}/g, '').trim();
+    vars[key] = prompt(`请输入变量 "${key}" 的值：`) || `[${key}]`;
+  });
+
+  try {
+    const res = await fetch(`/api/agents/${agentName}/prompts/render`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ variables: vars })
+    });
+    const data = await res.json();
+    const previewEl = document.getElementById(`preview_${layer}`);
+    previewEl.style.display = 'block';
+    previewEl.querySelector('.preview-content').textContent = data.rendered;
+  } catch (e) {
+    toast('预览失败', 'error');
+  }
+}
+
+function toggleEditModelConfig() {
+  const checked = document.getElementById('editUseCustomModel').checked;
+  document.getElementById('editModelConfigFields').style.display = checked ? 'block' : 'none';
+}
+
+document.addEventListener('input', function(e) {
+  if (e.target && e.target.id === 'editAgentTemp') {
+    const el = document.getElementById('editAgentTempValue');
+    if (el) el.textContent = e.target.value;
+  }
+});
+
+async function saveModelConfig(name) {
+  const useCustom = document.getElementById('editUseCustomModel').checked;
+  let llm_config = {};
+  if (useCustom) {
+    llm_config = {
+      provider: document.getElementById('editAgentProvider').value,
+      model: document.getElementById('editAgentModel').value.trim(),
+      api_key: document.getElementById('editAgentApiKey').value.trim(),
+      api_base: document.getElementById('editAgentApiBase').value.trim() || null,
+      temperature: parseFloat(document.getElementById('editAgentTemp').value),
+    };
+    if (!llm_config.model || !llm_config.api_key) {
+      toast('Model 和 API Key 不能为空', 'error');
+      return;
+    }
+  }
+
+  try {
+    const res = await fetch(`/api/agents/${name}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ llm_config })
+    });
+    if (res.ok) {
+      toast('模型配置保存成功', 'success');
+    } else {
+      const data = await res.json();
+      toast(data.error || '保存失败', 'error');
+    }
+  } catch (e) {
+    toast('保存失败', 'error');
+  }
+}
+
+async function testAgentConnection(name) {
+  toast('正在测试连接...', 'info');
+  try {
+    const res = await fetch(`/api/agents/${name}/test-connection`, { method: 'POST' });
+    const data = await res.json();
+    if (res.ok && data.status === 'ok') {
+      toast('连接成功', 'success');
+    } else {
+      toast(data.message || '连接失败', 'error');
+    }
+  } catch (e) {
+    toast('连接测试失败', 'error');
+  }
+}
+
+async function updateAgent(name) {
+  const payload = {
+    display_name: document.getElementById('editDisplayName').value,
+    description: document.getElementById('editDescription').value,
+    icon: document.getElementById('editIcon').value,
+    is_active: document.getElementById('editIsActive').value === 'true',
+  };
+
+  try {
+    const res = await fetch(`/api/agents/${name}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (res.ok) {
+      toast('保存成功', 'success');
+      loadAgents();
+    } else {
+      const data = await res.json();
+      toast(data.error || '保存失败', 'error');
+    }
+  } catch (e) {
+    toast('保存失败', 'error');
+  }
+}
+
+async function deleteAgent(name) {
+  if (!confirm(`确定要删除智能体 "${name}" 吗？`)) return;
+  try {
+    const res = await fetch(`/api/agents/${name}`, { method: 'DELETE' });
+    if (res.ok) {
+      toast('删除成功', 'success');
+      currentAgent = null;
+      loadAgents();
+      document.getElementById('agentDetail').innerHTML = `
+        <div class="detail-empty">
+          <div class="empty-icon">🤖</div>
+          <div class="empty-title">选择一个智能体查看详情</div>
+        </div>
+      `;
+    } else {
+      const data = await res.json();
+      toast(data.error || '删除失败', 'error');
+    }
+  } catch (e) {
+    toast('删除失败', 'error');
+  }
+}
+
+function showCreateAgentModal() {
+  document.getElementById('createAgentModal').style.display = 'flex';
+}
+
+function hideCreateAgentModal() {
+  document.getElementById('createAgentModal').style.display = 'none';
+  _generatedPrompt = null;
+  document.getElementById('promptPreviewArea').style.display = 'none';
+  document.getElementById('newAgentDescription').value = '';
+  document.getElementById('newAgentName').value = '';
+  document.getElementById('newAgentDisplayName').value = '';
+}
+
+let _generatedPrompt = null;
+
+async function generatePromptPreview() {
+  const description = document.getElementById('newAgentDescription').value.trim();
+  const roleType = document.getElementById('newAgentRoleType').value;
+  if (!description) {
+    toast('请先填写智能体描述', 'error');
+    return;
+  }
+
+  const btn = document.getElementById('genPromptBtn');
+  btn.disabled = true;
+  btn.textContent = '生成中...';
+
+  try {
+    const res = await fetch('/api/agents/generate-prompt', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ description, role_type: roleType })
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      toast(data.error || '生成失败', 'error');
+      return;
+    }
+
+    _generatedPrompt = data;
+    document.getElementById('previewRoleContent').textContent = data.role?.content || '';
+    document.getElementById('previewFormatContent').textContent = data.format?.content || '';
+    const vars = [];
+    if (data.role?.variables) vars.push(...data.role.variables);
+    if (data.format?.variables) vars.push(...data.format.variables);
+    document.getElementById('previewVariables').textContent = vars.length > 0 ? JSON.stringify(vars, null, 2) : '无变量';
+    document.getElementById('promptPreviewArea').style.display = 'block';
+    toast('Prompt 生成成功', 'success');
+  } catch (e) {
+    toast('生成失败', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'AI 生成 Prompt';
+  }
+}
+
+function toggleModelConfig() {
+  const checked = document.getElementById('newAgentUseCustomModel').checked;
+  document.getElementById('newAgentModelConfig').style.display = checked ? 'block' : 'none';
+}
+
+document.getElementById('newAgentTemp').addEventListener('input', function() {
+  document.getElementById('newAgentTempValue').textContent = this.value;
+});
+
+async function createAgent() {
+  const payload = {
+    name: document.getElementById('newAgentName').value.trim(),
+    display_name: document.getElementById('newAgentDisplayName').value.trim(),
+    role_type: document.getElementById('newAgentRoleType').value,
+    description: document.getElementById('newAgentDescription').value.trim(),
+    icon: document.getElementById('newAgentIcon').value.trim(),
+  };
+
+  const useCustom = document.getElementById('newAgentUseCustomModel').checked;
+  if (useCustom) {
+    payload.llm_config = {
+      provider: document.getElementById('newAgentProvider').value,
+      model: document.getElementById('newAgentModel').value.trim(),
+      api_key: document.getElementById('newAgentApiKey').value.trim(),
+      api_base: document.getElementById('newAgentApiBase').value.trim() || null,
+      temperature: parseFloat(document.getElementById('newAgentTemp').value),
+    };
+  }
+
+  if (!payload.name || !payload.display_name) {
+    toast('标识名和显示名称不能为空', 'error');
+    return;
+  }
+
+  try {
+    const res = await fetch('/api/agents', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (res.ok) {
+      const agentData = await res.json();
+      // Auto-save generated prompts if available
+      if (_generatedPrompt) {
+        const agentName = agentData.name;
+        const promises = [];
+        if (_generatedPrompt.role?.content) {
+          promises.push(fetch(`/api/agents/${agentName}/prompts`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              layer: 'role',
+              name: 'system_prompt',
+              content: _generatedPrompt.role.content,
+              variables: _generatedPrompt.role.variables || [],
+              is_editable: true
+            })
+          }));
+        }
+        if (_generatedPrompt.format?.content) {
+          promises.push(fetch(`/api/agents/${agentName}/prompts`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              layer: 'format',
+              name: 'execution_template',
+              content: _generatedPrompt.format.content,
+              variables: _generatedPrompt.format.variables || [],
+              is_editable: true
+            })
+          }));
+        }
+        await Promise.all(promises);
+      }
+      toast('创建成功', 'success');
+      hideCreateAgentModal();
+      loadAgents();
+    } else {
+      const data = await res.json();
+      toast(data.error || '创建失败', 'error');
+    }
+  } catch (e) {
+    toast('创建失败', 'error');
+  }
+}
+
+document.addEventListener('DOMContentLoaded', loadAgents);
+</script>
+{% endblock %}

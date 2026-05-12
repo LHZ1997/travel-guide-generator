@@ -1,0 +1,214 @@
+{% extends "base.html" %}
+{% block title %}编排关系 - Travel Guide Generator{% endblock %}
+{% block body_class %}orchestration-page{% endblock %}
+{% block content %}
+<div class="orch-layout">
+  <div class="orch-header">
+    <h2>智能体编排关系</h2>
+    <p class="orch-desc">配置智能体之间的调用关系：谁触发谁、在什么阶段触发</p>
+  </div>
+
+  <div class="orch-create">
+    <h3>添加关系</h3>
+    <div class="form-row">
+      <div class="form-group">
+        <label>触发方</label>
+        <select id="relSource"></select>
+      </div>
+      <div class="form-group">
+        <label>被调用方</label>
+        <select id="relTarget"></select>
+      </div>
+      <div class="form-group">
+        <label>触发阶段</label>
+        <select id="relStage">
+          <option value="">任意阶段</option>
+          <option value="INIT">INIT - 需求收集</option>
+          <option value="SCENE_COLLECTION">SCENE_COLLECTION - 景点梳理</option>
+          <option value="SELECTION">SELECTION - 景点选择</option>
+          <option value="DOC_GENERATION">DOC_GENERATION - 规划文档</option>
+          <option value="DOC_CONFIRM">DOC_CONFIRM - 规划确认</option>
+          <option value="EXECUTION">EXECUTION - 攻略生成</option>
+          <option value="CHECKING">CHECKING - 质量检查</option>
+          <option value="FINAL_OUTPUT">FINAL_OUTPUT - 最终输出</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>排序</label>
+        <input type="number" id="relOrder" value="0" min="0">
+      </div>
+    </div>
+    <div class="form-group">
+      <label>触发条件描述</label>
+      <input type="text" id="relCondition" placeholder="如：当需要生成美食模块时触发">
+    </div>
+    <button class="btn-primary" onclick="addRelation()">添加关系</button>
+  </div>
+
+  <div class="orch-table-wrap">
+    <h3>关系列表</h3>
+    <table class="orch-table" id="relationTable">
+      <thead>
+        <tr>
+          <th>触发方</th>
+          <th>被调用方</th>
+          <th>触发阶段</th>
+          <th>条件</th>
+          <th>排序</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td colspan="6" class="empty-cell">加载中...</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="orch-graph">
+    <h3>关系图预览</h3>
+    <div id="relationGraph" class="graph-container">
+      <div class="graph-empty">暂无关系数据，添加关系后将在此显示</div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>
+mermaid.initialize({ startOnLoad: false });
+
+let allAgents = [];
+let allRelations = [];
+
+async function loadData() {
+  try {
+    const [agentsRes, relationsRes] = await Promise.all([
+      fetch('/api/agents'),
+      fetch('/api/agent-relations')
+    ]);
+    allAgents = await agentsRes.json();
+    allRelations = await relationsRes.json();
+    renderAgentSelects();
+    renderRelationTable();
+    renderGraph();
+  } catch (e) {
+    toast('加载数据失败', 'error');
+  }
+}
+
+function renderAgentSelects() {
+  const source = document.getElementById('relSource');
+  const target = document.getElementById('relTarget');
+  const opts = allAgents.map(a => `<option value="${a.name}">${a.display_name} (${a.name})</option>`).join('');
+  source.innerHTML = opts;
+  target.innerHTML = opts;
+}
+
+function renderRelationTable() {
+  const tbody = document.querySelector('#relationTable tbody');
+  if (allRelations.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="6" class="empty-cell">暂无编排关系</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = allRelations.map(r => {
+    const source = allAgents.find(a => a.name === r.source_agent);
+    const target = allAgents.find(a => a.name === r.target_agent);
+    return `
+      <tr>
+        <td>${source ? source.display_name : r.source_agent}</td>
+        <td>${target ? target.display_name : r.target_agent}</td>
+        <td><span class="stage-badge">${r.trigger_stage || '任意'}</span></td>
+        <td>${r.trigger_condition || '-'}</td>
+        <td>${r.order_index}</td>
+        <td><button class="btn-icon" onclick="deleteRelation(${r.id})"><svg width="16" height="16"><use href="#icon-trash"/></svg></button></td>
+      </tr>
+    `;
+  }).join('');
+}
+
+async function addRelation() {
+  const payload = {
+    source_agent: document.getElementById('relSource').value,
+    target_agent: document.getElementById('relTarget').value,
+    trigger_stage: document.getElementById('relStage').value,
+    trigger_condition: document.getElementById('relCondition').value,
+    order_index: parseInt(document.getElementById('relOrder').value),
+  };
+
+  if (payload.source_agent === payload.target_agent) {
+    toast('触发方和被调用方不能相同', 'error');
+    return;
+  }
+
+  try {
+    const res = await fetch('/api/agent-relations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (res.ok) {
+      toast('添加成功', 'success');
+      document.getElementById('relCondition').value = '';
+      loadData();
+    } else {
+      const data = await res.json();
+      toast(data.error || '添加失败', 'error');
+    }
+  } catch (e) {
+    toast('添加失败', 'error');
+  }
+}
+
+async function deleteRelation(id) {
+  if (!confirm('确定删除此关系？')) return;
+  try {
+    const res = await fetch(`/api/agent-relations/${id}`, { method: 'DELETE' });
+    if (res.ok) {
+      toast('删除成功', 'success');
+      loadData();
+    } else {
+      toast('删除失败', 'error');
+    }
+  } catch (e) {
+    toast('删除失败', 'error');
+  }
+}
+
+async function renderGraph() {
+  try {
+    const res = await fetch('/api/agent-relations/graph');
+    const data = await res.json();
+    const container = document.getElementById('relationGraph');
+
+    // No data
+    if (data.nodes.length === 0) {
+      container.innerHTML = '<div class="graph-empty">暂无关系数据，添加关系后将在此显示</div>';
+      return;
+    }
+
+    // Build mermaid code
+    let mermaidCode = 'graph LR\n';
+    data.nodes.forEach(n => {
+      mermaidCode += `  ${n.id}["${n.label}"]\n`;
+    });
+    data.edges.forEach(e => {
+      const label = e.stage ? `|${e.stage}|` : '';
+      mermaidCode += `  ${e.source} --> ${label} ${e.target}\n`;
+    });
+
+    // Use mermaid.render() for reliable dynamic rendering
+    const id = 'rel-graph-' + Date.now();
+    const { svg } = await mermaid.render(id, mermaidCode);
+    container.innerHTML = svg;
+  } catch (e) {
+    console.error('Graph render error:', e);
+    const container = document.getElementById('relationGraph');
+    container.innerHTML = '<div class="graph-empty">关系图渲染失败，请刷新页面重试</div>';
+  }
+}
+
+document.addEventListener('DOMContentLoaded', loadData);
+</script>
+{% endblock %}

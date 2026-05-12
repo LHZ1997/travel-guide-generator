@@ -1,0 +1,1844 @@
+/* ====== Global State ====== */
+let currentSessionId = null;
+let currentStage = 'INIT';
+let isStreaming = false;
+let currentMessageEl = null;
+let expertResults = {};
+let expertStatus = {};
+let expertResultsCache = {};
+
+function generateSessionId() {
+  return Array.from({ length: 8 }, () =>
+    Math.floor(Math.random() * 16).toString(16)
+  ).join('');
+}
+
+const STAGE_ORDER = [
+  'REQUIREMENT', 'REQUIREMENT_CONFIRMED', 'EXECUTION', 'COMPLETE'
+];
+
+/* ====== marked.js Setup ====== */
+let mdRenderer = null;
+
+function initMarked() {
+  if (typeof marked === 'undefined') {
+    console.warn('marked.js not loaded, using fallback');
+    mdRenderer = null;
+    return;
+  }
+
+  try {
+    // marked v12+ API: use marked.use() for custom renderer
+    if (typeof hljs !== 'undefined') {
+      marked.use({
+        renderer: {
+          code(code, language) {
+            const validLang = language && hljs.getLanguage(language) ? language : 'plaintext';
+            const highlighted = hljs.highlight(code, { language: validLang }).value;
+            return `<pre><div class="code-header"><span>${validLang}</span><button class="copy-code-btn" onclick="copyCode(this)">复制</button></div><code class="hljs language-${validLang}">${highlighted}</code></pre>`;
+          }
+        }
+      });
+    }
+    mdRenderer = marked;
+  } catch (e) {
+    console.warn('Failed to init marked with custom renderer:', e);
+    mdRenderer = marked;
+  }
+}
+
+function renderMarkdown(text) {
+  if (!mdRenderer) return simpleFormat(text);
+  try {
+    return mdRenderer.parse(text);
+  } catch (e) {
+    console.error('marked parse error:', e);
+    return simpleFormat(text);
+  }
+}
+
+function simpleFormat(text) {
+  return text
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/`(.+?)`/g, '<code>$1</code>')
+    .replace(/\n/g, '<br>');
+}
+
+/* ====== Config Page ====== */
+if (document.getElementById('plannerProvider')) {
+  loadConfig();
+}
+
+async function loadConfig() {
+  try {
+    const res = await fetch('/api/config');
+    const data = await res.json();
+    if (data.planner) {
+      setVal('plannerProvider', data.planner.provider);
+      setVal('plannerModel', data.planner.model);
+      setVal('plannerApiKey', data.planner.api_key);
+      setVal('plannerApiBase', data.planner.api_base);
+      setVal('plannerTemp', data.planner.temperature);
+      setCheckbox('plannerThinkingEnabled', data.planner.thinking_enabled);
+      setVal('plannerReasoningEffort', data.planner.reasoning_effort);
+      updateTempDisplay('planner');
+    }
+    if (data.checker) {
+      setVal('checkerProvider', data.checker.provider);
+      setVal('checkerModel', data.checker.model);
+      setVal('checkerApiKey', data.checker.api_key);
+      setVal('checkerApiBase', data.checker.api_base);
+      setVal('checkerTemp', data.checker.temperature);
+      setCheckbox('checkerThinkingEnabled', data.checker.thinking_enabled);
+      setVal('checkerReasoningEffort', data.checker.reasoning_effort);
+      updateTempDisplay('checker');
+    }
+  } catch (e) {
+    console.error('Failed to load config:', e);
+    toast('加载配置失败', 'error');
+  }
+}
+
+function setVal(id, val) {
+  const el = document.getElementById(id);
+  if (el && val !== undefined && val !== null) el.value = val;
+}
+
+function setCheckbox(id, checked) {
+  const el = document.getElementById(id);
+  if (el) el.checked = Boolean(checked);
+}
+
+function getCheckbox(id) {
+  const el = document.getElementById(id);
+  return el ? el.checked : true;
+}
+
+function updateTempDisplay(prefix) {
+  const val = document.getElementById(prefix + 'Temp')?.value || '0.5';
+  const disp = document.getElementById(prefix + 'TempValue');
+  if (disp) disp.textContent = val;
+}
+
+async function saveConfig() {
+  const config = {
+    planner: {
+      provider: getVal('plannerProvider'),
+      model: getVal('plannerModel'),
+      api_key: getVal('plannerApiKey'),
+      api_base: getVal('plannerApiBase') || null,
+      temperature: parseFloat(getVal('plannerTemp')),
+      thinking_enabled: getCheckbox('plannerThinkingEnabled'),
+      reasoning_effort: getVal('plannerReasoningEffort'),
+    },
+    checker: {
+      provider: getVal('checkerProvider'),
+      model: getVal('checkerModel'),
+      api_key: getVal('checkerApiKey'),
+      api_base: getVal('checkerApiBase') || null,
+      temperature: parseFloat(getVal('checkerTemp')),
+      thinking_enabled: getCheckbox('checkerThinkingEnabled'),
+      reasoning_effort: getVal('checkerReasoningEffort'),
+    }
+  };
+
+  try {
+    const res = await fetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(config)
+    });
+    if (res.ok) {
+      toast('配置已保存', 'success');
+    } else {
+      toast('保存失败', 'error');
+    }
+  } catch (e) {
+    toast('保存失败: ' + e.message, 'error');
+  }
+}
+
+function getVal(id) {
+  return document.getElementById(id)?.value || '';
+}
+
+// Temperature slider listeners
+['plannerTemp', 'checkerTemp'].forEach(id => {
+  const el = document.getElementById(id);
+  if (el) {
+    el.addEventListener('input', () => updateTempDisplay(id.replace('Temp', '')));
+  }
+});
+
+/* ====== Chat Functions ====== */
+function fillInput(text) {
+  const input = document.getElementById('messageInput');
+  if (input) {
+    input.value = text;
+    autoResize(input);
+    input.focus();
+  }
+}
+
+function autoResize(el) {
+  el.style.height = 'auto';
+  el.style.height = Math.min(el.scrollHeight, 120) + 'px';
+}
+
+function handleKeydown(e) {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
+}
+
+let userScrolledUp = false;
+
+function scrollToBottom(force = false) {
+  const container = document.getElementById('chatMessages');
+  if (!container) return;
+
+  // Only auto-scroll if user is near bottom or force is true
+  const threshold = 100; // px from bottom
+  const isNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < threshold;
+
+  if (force || isNearBottom) {
+    container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
+  }
+}
+
+// Detect user manual scroll
+(function initScrollDetect() {
+  const container = document.getElementById('chatMessages');
+  if (!container) return;
+  container.addEventListener('scroll', () => {
+    const threshold = 100;
+    const isNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < threshold;
+    userScrolledUp = !isNearBottom;
+  });
+})();
+
+function hideEmptyState() {
+  const empty = document.getElementById('emptyState');
+  if (empty) empty.style.display = 'none';
+}
+
+/* ====== Message Rendering ====== */
+function addMessage(role, content, streaming = false) {
+  hideEmptyState();
+  const container = document.getElementById('chatMessages');
+  if (!container) return;
+
+  const div = document.createElement('div');
+  div.className = `message message-${role}`;
+
+  const avatar = role === 'user' ? '👤' : '🤖';
+  const roleName = role === 'user' ? '你' : 'TravelPlanner';
+
+  div.innerHTML = `
+    <div class="message-avatar">${avatar}</div>
+    <div class="message-body">
+      <div class="message-role">${roleName}</div>
+      <div class="message-bubble">${streaming ? '' : renderMarkdown(stripClientMarkup(content))}</div>
+      <div class="message-actions">
+        <button class="msg-action-btn" onclick="copyMessage(this)">复制</button>
+      </div>
+    </div>
+  `;
+
+  container.appendChild(div);
+  scrollToBottom();
+  return div;
+}
+
+function addExpertResultMessage(expertName, preview, fullLen) {
+  const meta = expertMetaMap[expertName] || { name: expertName, icon: '🔧' };
+  const container = document.getElementById('chatMessages');
+  if (!container) return;
+
+  const div = document.createElement('div');
+  div.className = 'message message-expert';
+  div.id = `expert-msg-${expertName}`;
+
+  const isLong = preview.length > 500;
+  const displayText = isLong ? preview.substring(0, 500) : preview;
+
+  div.innerHTML = `
+    <div class="message-avatar">${meta.icon}</div>
+    <div class="message-body">
+      <div class="message-role">
+        ${meta.name}
+        <span class="expert-msg-badge">${fullLen} 字</span>
+      </div>
+      <div class="message-bubble expert-output-preview" id="expert-output-${expertName}">
+        <div class="markdown-body">${renderMarkdown(stripClientMarkup(displayText))}</div>
+        ${isLong ? `<div class="expert-output-more" onclick="toggleExpertOutput('${expertName}')">📋 展开完整输出 (${fullLen} 字)</div>` : ''}
+      </div>
+      <div class="expert-output-full" id="expert-full-${expertName}" style="display:none;"></div>
+    </div>
+  `;
+
+  container.appendChild(div);
+  scrollToBottom();
+  return div;
+}
+
+async function toggleExpertOutput(expertName) {
+   const fullEl = document.getElementById(`expert-full-${expertName}`);
+   const previewEl = document.getElementById(`expert-output-${expertName}`);
+   if (!fullEl || !previewEl) return;
+
+   if (fullEl.style.display === 'none') {
+     // Try cache first
+     let content = expertResultsCache[expertName];
+     if (!content) {
+       // Fallback to server
+       try {
+         const res = await fetch(`/api/session/${currentSessionId}/guide`);
+         const guide = await res.json();
+         const results = guide.expert_results || {};
+         content = typeof results === 'string' ? JSON.parse(results)[expertName] : results[expertName];
+       } catch (e) {
+         console.error('Failed to load expert output:', e);
+         return;
+       }
+     }
+     if (content) {
+       fullEl.innerHTML = `<div class="markdown-body">${renderMarkdown(stripClientMarkup(content))}</div>`;
+       fullEl.style.display = 'block';
+       previewEl.querySelector('.expert-output-more').textContent = '📋 收起';
+       scrollToBottom();
+     }
+   } else {
+     fullEl.style.display = 'none';
+     previewEl.querySelector('.expert-output-more').textContent = '📋 展开完整输出';
+   }
+ }
+
+const expertMetaMap = {
+  scene_expert: { name: '景点规划专家', icon: '🏔️' },
+  hotel_expert: { name: '酒店规划专家', icon: '🏨' },
+  food_expert: { name: '美食搜索专家', icon: '🍜' },
+  route_expert: { name: '路线规划专家', icon: '🚗' },
+};
+
+function appendToCurrentMessage(text) {
+  if (!currentMessageEl) return;
+  const bubble = currentMessageEl.querySelector('.message-bubble');
+  if (!bubble) return;
+
+  // Accumulate raw text
+  let rawText = bubble.dataset.raw || '';
+  rawText += text;
+  bubble.dataset.raw = rawText;
+
+  // Re-render markdown
+  bubble.innerHTML = renderMarkdown(rawText) + '<span class="streaming-cursor"></span>';
+
+  // Apply syntax highlighting to code blocks
+  bubble.querySelectorAll('pre code').forEach(block => {
+    if (typeof hljs !== 'undefined' && !block.classList.contains('hljs-done')) {
+      hljs.highlightElement(block);
+      block.classList.add('hljs-done');
+    }
+  });
+
+  scrollToBottom();
+}
+
+function finishCurrentMessage() {
+  if (!currentMessageEl) return;
+  const bubble = currentMessageEl.querySelector('.message-bubble');
+  if (bubble) {
+    const raw = bubble.dataset.raw || '';
+    bubble.innerHTML = renderMarkdown(raw);
+    // Highlight all code blocks
+    bubble.querySelectorAll('pre code').forEach(block => {
+      if (typeof hljs !== 'undefined') hljs.highlightElement(block);
+    });
+  }
+  currentMessageEl = null;
+  isStreaming = false;
+}
+
+/* ====== Skeleton Loading ====== */
+function showSkeleton() {
+  hideEmptyState();
+  const container = document.getElementById('chatMessages');
+  if (!container) return;
+
+  const div = document.createElement('div');
+  div.className = 'skeleton';
+  div.id = 'skeletonMsg';
+  div.innerHTML = `
+    <div class="skeleton-avatar"></div>
+    <div class="skeleton-body">
+      <div class="skeleton-line short"></div>
+      <div class="skeleton-line medium"></div>
+      <div class="skeleton-line"></div>
+    </div>
+  `;
+  container.appendChild(div);
+  scrollToBottom();
+}
+
+function hideSkeleton() {
+  const sk = document.getElementById('skeletonMsg');
+  if (sk) sk.remove();
+}
+
+/* ====== Streaming Message Helpers ====== */
+function addStreamingMessage() {
+  hideEmptyState();
+  const container = document.getElementById('chatMessages');
+  if (!container) return null;
+
+  const div = document.createElement('div');
+  div.className = 'message message-agent';
+  div.innerHTML = `
+    <div class="message-avatar">🤖</div>
+    <div class="message-body">
+      <div class="message-role">TravelPlanner</div>
+      <div class="message-bubble streaming">
+        <div class="reasoning-block collapsed" style="display:none;">
+          <div class="reasoning-toggle" onclick="toggleReasoning(this)">
+            <span class="reasoning-icon">▶</span>
+            <span class="reasoning-label">思考过程</span>
+          </div>
+          <div class="reasoning-content"></div>
+        </div>
+        <div class="content-body"></div>
+      </div>
+      <div class="message-actions">
+        <button class="msg-action-btn" onclick="copyMessage(this)">复制</button>
+      </div>
+    </div>
+  `;
+
+  container.appendChild(div);
+  scrollToBottom();
+  return div;
+}
+
+function updateStreamingReasoning(text) {
+  if (!currentMessageEl) return;
+  const block = currentMessageEl.querySelector('.reasoning-block');
+  const content = currentMessageEl.querySelector('.reasoning-content');
+  const toggle = currentMessageEl.querySelector('.reasoning-toggle');
+  if (!block || !content) return;
+
+  block.style.display = '';
+  // Auto-expand reasoning block so user can see thinking in real-time
+  block.classList.remove('collapsed');
+  block.classList.add('expanded');
+  if (toggle) {
+    toggle.querySelector('.reasoning-icon').textContent = '▼';
+  }
+  content.textContent = text;
+  scrollToBottom();
+}
+
+function updateStreamingContent(text) {
+  if (!currentMessageEl) return;
+  const body = currentMessageEl.querySelector('.content-body');
+  if (!body) return;
+
+  const cleanText = stripClientMarkup(text);
+  body.innerHTML = renderMarkdown(cleanText) + '<span class="streaming-cursor"></span>';
+
+  // Highlight code blocks
+  body.querySelectorAll('pre code').forEach(block => {
+    if (typeof hljs !== 'undefined' && !block.classList.contains('hljs-done')) {
+      hljs.highlightElement(block);
+      block.classList.add('hljs-done');
+    }
+  });
+
+  scrollToBottom();
+}
+
+/* Strip [QUESTION] markup from client-side display */
+function stripClientMarkup(text) {
+  if (!text) return '';
+  return text
+    .replace(/\[QUESTION\][\s\S]*?\[\/QUESTION\]/g, '')
+    .replace(/\[\/?TEXT\]/g, '')
+    .replace(/\[\/?CHOICE\]\s*(?:single|multi)?/g, '')
+    .replace(/\n\s*rows=\d+\s*\n/g, '\n')
+    .replace(/\n\s*placeholder=.*/g, '')
+    .replace(/\[TASK_DISPATCH\]/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function finishStreamingMessage(content, reasoning) {
+  if (!currentMessageEl) return;
+
+  const bubble = currentMessageEl.querySelector('.message-bubble');
+  const body = currentMessageEl.querySelector('.content-body');
+  const reasoningBlock = currentMessageEl.querySelector('.reasoning-block');
+
+  if (bubble) {
+    bubble.classList.remove('streaming');
+    bubble.dataset.raw = content;
+  }
+  if (body) {
+    body.innerHTML = renderMarkdown(stripClientMarkup(content));
+    body.querySelectorAll('pre code').forEach(block => {
+      if (typeof hljs !== 'undefined') hljs.highlightElement(block);
+    });
+  }
+
+  // Hide reasoning block if empty
+  if (reasoningBlock && (!reasoning || reasoning.trim().length === 0)) {
+    reasoningBlock.style.display = 'none';
+  }
+
+  // Extract quick replies from model response
+  extractQuickReplies(content);
+
+  currentMessageEl = null;
+}
+
+function toggleReasoning(btn) {
+  const block = btn.closest('.reasoning-block');
+  const isCollapsed = block.classList.contains('collapsed');
+  block.classList.toggle('collapsed', !isCollapsed);
+  block.classList.toggle('expanded', isCollapsed);
+  btn.querySelector('.reasoning-icon').textContent = isCollapsed ? '▼' : '▶';
+}
+
+function extractQuickReplies(content) {
+  const container = document.getElementById('quickReplies');
+  if (!container) return;
+
+  // Clear previous
+  container.innerHTML = '';
+
+  // Patterns to extract options:
+  // 1. A. option / B. option / C. option
+  // 2. 1. option / 2. option / 3. option
+  // 3. - option
+  // 4. "确认", "继续", "再想想" etc at end of questions
+
+  const lines = content.split('\n');
+  const options = [];
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    // Match letter/number options
+    const match = trimmed.match(/^([A-Da-d]|\d+)\.\s*(.+)/);
+    if (match) {
+      options.push(match[2].trim());
+    }
+    // Match dash list items that look like options
+    if (trimmed.startsWith('- ') && trimmed.length < 60) {
+      const text = trimmed.slice(2).trim();
+      if (text && !text.includes('：') && !text.includes(':')) {
+        options.push(text);
+      }
+    }
+  }
+
+  // Also add common confirmation/rejection replies if model is asking
+  const isAsking = /[吗\?？]$/.test(content.trim().slice(-20));
+  if (isAsking) {
+    const common = ['确认', '继续', '再想想', '不确定'];
+    for (const c of common) {
+      if (!options.includes(c)) options.push(c);
+    }
+  }
+
+  if (options.length === 0) {
+    container.style.display = 'none';
+    return;
+  }
+
+  // Show unique options (max 6)
+  const unique = [...new Set(options)].slice(0, 6);
+  container.innerHTML = unique.map(opt => `
+    <button class="quick-reply-btn" onclick="fillInput('${opt.replace(/'/g, "\\'")}')">${opt}</button>
+  `).join('');
+  container.style.display = 'flex';
+}
+
+function clearQuickReplies() {
+  const container = document.getElementById('quickReplies');
+  if (container) {
+    container.innerHTML = '';
+    container.style.display = 'none';
+  }
+}
+
+/* ====== Interactive Options Card ====== */
+function showOptionsCard(options) {
+  if (!options) return;
+
+  const container = document.getElementById('chatMessages');
+  if (!container) return;
+
+  const existing = document.getElementById('optionsCardEl');
+  if (existing) existing.remove();
+
+  const div = document.createElement('div');
+  div.id = 'optionsCardEl';
+  div.className = 'options-card';
+
+  // --- NEW: question_block format with mixed text/choice fields ---
+  if (options.type === 'question_block' && options.fields && options.fields.length > 0) {
+    const fieldsHtml = options.fields.map((f, idx) => {
+      if (f.type === 'text') {
+        return `
+          <div class="options-field options-field-text">
+            <div class="options-field-label">${escapeHtml(f.label)}</div>
+            <textarea
+              class="options-text-input"
+              data-field="${idx}"
+              rows="${f.rows || 1}"
+              placeholder="${escapeHtml(f.placeholder || '')}"
+              oninput="autoResizeInput(this); checkQuestionBlockReady()"
+            ></textarea>
+          </div>`;
+      } else if (f.type === 'choice_single') {
+        return `
+          <div class="options-field options-field-choice" data-field="${idx}">
+            <div class="options-field-label">${escapeHtml(f.label)}</div>
+            <div class="options-list">
+              ${(f.options || []).map(opt => `
+                <button class="option-btn" data-field="${idx}" data-label="${escapeHtml(opt.label)}" onclick="toggleSingleChoice(this, ${idx})">
+                  <span class="option-label">${escapeHtml(opt.label)}</span>
+                  <span class="option-text">${escapeHtml(opt.text)}</span>
+                </button>
+              `).join('')}
+            </div>
+          </div>`;
+      } else if (f.type === 'choice_multi') {
+        return `
+          <div class="options-field options-field-choice" data-field="${idx}">
+            <div class="options-field-label">${escapeHtml(f.label)}</div>
+            <div class="options-list">
+              ${(f.options || []).map(opt => `
+                <button class="option-btn option-btn-multi" data-field="${idx}" data-label="${escapeHtml(opt.label)}" onclick="toggleMultiChoice(this, ${idx})">
+                  <span class="option-check">☐</span>
+                  <span class="option-text">${escapeHtml(opt.text)}</span>
+                </button>
+              `).join('')}
+            </div>
+          </div>`;
+      }
+      return '';
+    }).join('');
+
+    div.innerHTML = `
+      <div class="options-header">
+        <span class="options-header-icon">💡</span>
+        <span class="options-question">请完善以下信息：</span>
+      </div>
+      <div class="options-fields">
+        ${fieldsHtml}
+      </div>
+      <div class="options-actions">
+        <button class="options-submit-btn" id="optionsSubmitBtn" onclick="submitQuestionBlock()">
+          ✅ 提交
+        </button>
+        <button class="options-skip-btn" onclick="skipOptions()">
+          跳过，我想自己输入
+        </button>
+      </div>
+    `;
+  } else if (options.type === 'multi' && options.groups && options.groups.length > 0) {
+    // Multi-group: each group is a question with its own options, independently selectable
+    const groupHtml = options.groups.map((g, idx) => `
+      <div class="options-group" data-group="${idx}">
+        <div class="options-group-header">
+          <span class="options-group-num">${idx + 1}</span>
+          <span class="options-group-question">${escapeHtml(g.question || '请选择：')}</span>
+        </div>
+        <div class="options-list">
+          ${g.options.map(opt => `
+            <button class="option-btn" data-group="${idx}" data-label="${escapeHtml(opt.label)}" onclick="toggleMultiOption(this, '${idx}', '${escapeHtml(opt.label).replace(/'/g, "\\'")}', '${escapeHtml(opt.text).replace(/'/g, "\\'")}')">
+              <span class="option-label">${escapeHtml(opt.label)}</span>
+              <span class="option-text">${escapeHtml(opt.text)}</span>
+            </button>
+          `).join('')}
+        </div>
+      </div>
+    `).join('');
+
+    div.innerHTML = `
+      <div class="options-header">
+        <span class="options-header-icon">💡</span>
+        <span class="options-question">请为以下问题分别选择答案：</span>
+      </div>
+      ${groupHtml}
+      <div class="options-actions">
+        <button class="options-submit-btn" id="optionsSubmitBtn" disabled onclick="submitMultiOptions()">
+          ✅ 提交所有答案
+        </button>
+        <button class="options-skip-btn" onclick="skipOptions()">
+          跳过，我想手动输入
+        </button>
+      </div>
+    `;
+  } else {
+    // Single group: backwards compatible
+    const opts = options.options || [];
+    if (opts.length === 0) return;
+
+    div.innerHTML = `
+      <div class="options-header">
+        <span class="options-header-icon">💡</span>
+        <span class="options-question">${escapeHtml(options.question || '请选择：')}</span>
+      </div>
+      <div class="options-list">
+        ${opts.map(opt => `
+          <button class="option-btn" onclick="selectOption('${escapeHtml(opt.label).replace(/'/g, "\\'")}', '${escapeHtml(opt.text).replace(/'/g, "\\'")}')">
+            <span class="option-label">${escapeHtml(opt.label)}</span>
+            <span class="option-text">${escapeHtml(opt.text)}</span>
+          </button>
+        `).join('')}
+      </div>
+    `;
+  }
+
+  container.appendChild(div);
+  scrollToBottom(true);
+
+  window._optionSelections = {};
+  window._multiSelections = {};
+}
+
+/* ====== Question Block: mixed text + single choice + multi choice ====== */
+
+function toggleSingleChoice(btn, fieldIdx) {
+  const allInField = document.querySelectorAll(`.option-btn[data-field="${fieldIdx}"]`);
+  allInField.forEach(b => b.classList.remove('selected'));
+  btn.classList.add('selected');
+
+  if (!window._optionSelections) window._optionSelections = {};
+  window._optionSelections[fieldIdx] = {
+    label: btn.dataset.label,
+    text: btn.querySelector('.option-text')?.textContent || ''
+  };
+
+  checkQuestionBlockReady();
+}
+
+function toggleMultiChoice(btn, fieldIdx) {
+  btn.classList.toggle('selected');
+  const check = btn.querySelector('.option-check');
+  const isSelected = btn.classList.contains('selected');
+  if (check) check.textContent = isSelected ? '☑' : '☐';
+
+  if (!window._multiSelections) window._multiSelections = {};
+  if (!window._multiSelections[fieldIdx]) window._multiSelections[fieldIdx] = {};
+
+  const label = btn.dataset.label;
+  if (isSelected) {
+    window._multiSelections[fieldIdx][label] = btn.querySelector('.option-text')?.textContent || '';
+  } else {
+    delete window._multiSelections[fieldIdx][label];
+  }
+
+  checkQuestionBlockReady();
+}
+
+function autoResizeInput(el) {
+  el.style.height = 'auto';
+  el.style.height = el.scrollHeight + 'px';
+}
+
+function checkQuestionBlockReady() {
+  // Enable submit anytime since text fields can be empty and choices are optional
+  const submitBtn = document.getElementById('optionsSubmitBtn');
+  if (submitBtn) submitBtn.disabled = false;
+}
+
+function submitQuestionBlock() {
+  const card = document.getElementById('optionsCardEl');
+  if (!card) return;
+
+  const parts = [];
+
+  // Collect text inputs
+  card.querySelectorAll('.options-text-input').forEach((input) => {
+    const val = input.value.trim();
+    if (val) {
+      const label = input.closest('.options-field')?.querySelector('.options-field-label')?.textContent || '';
+      parts.push(`${label}: ${val}`);
+    }
+  });
+
+  // Collect single choices
+  const selections = window._optionSelections || {};
+  card.querySelectorAll('.options-field-choice').forEach(field => {
+    const fieldIdx = field.dataset.field;
+    const sel = selections[fieldIdx];
+    if (sel) {
+      const label = field.querySelector('.options-field-label')?.textContent || '';
+      parts.push(`${label}: ${sel.label}. ${sel.text}`);
+    }
+  });
+
+  // Collect multi choices
+  const multiSelections = window._multiSelections || {};
+  card.querySelectorAll('.options-field-choice').forEach(field => {
+    const fieldIdx = field.dataset.field;
+    const sels = multiSelections[fieldIdx];
+    if (sels && Object.keys(sels).length > 0) {
+      const label = field.querySelector('.options-field-label')?.textContent || '';
+      const vals = Object.entries(sels).map(([k, v]) => `${k}. ${v}`).join(', ');
+      parts.push(`${label}: ${vals}`);
+    }
+  });
+
+  const message = parts.join('\n');
+  if (!message.trim()) {
+    skipOptions();
+    return;
+  }
+
+  const input = document.getElementById('messageInput');
+  if (input) {
+    input.value = message;
+    autoResize(input);
+  }
+
+  card.remove();
+  window._optionSelections = {};
+  window._multiSelections = {};
+
+  hideEmptyState();
+  scrollToBottom();
+
+  setTimeout(() => sendMessage(), 200);
+}
+
+/* ====== Send Message ====== */
+async function sendMessage() {
+  const input = document.getElementById('messageInput');
+  const message = input?.value.trim();
+  if (!message || isStreaming) return;
+
+  // Generate session ID if first message
+  if (!currentSessionId) {
+    currentSessionId = generateSessionId();
+    localStorage.setItem('currentSessionId', currentSessionId);
+  }
+
+  input.value = '';
+  autoResize(input);
+  hideEmptyState();
+  clearQuickReplies();
+  const optCard = document.getElementById('optionsCardEl');
+  if (optCard) optCard.remove();
+  window._optionSelections = {};
+  addMessage('user', message);
+
+  const sendBtn = document.getElementById('sendBtn');
+  if (sendBtn) sendBtn.disabled = true;
+
+  isStreaming = true;
+
+  try {
+    await streamMessageSSE(message);
+  } catch (e) {
+    isStreaming = false;
+    addMessage('agent', '⚠️ ' + e.message);
+    toast('请求失败，请检查 LLM 配置', 'error');
+  } finally {
+    if (sendBtn) sendBtn.disabled = false;
+  }
+}
+
+async function streamMessageSSE(message) {
+  const body = { session_id: currentSessionId, message: message };
+
+  const res = await fetch('/api/chat/stream', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || '请求失败，状态码: ' + res.status);
+  }
+
+  // Create streaming message element
+  currentMessageEl = addStreamingMessage();
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let reasoningText = '';
+  let contentText = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+
+    // Process complete SSE lines
+    const lines = buffer.split('\n');
+    buffer = lines.pop(); // keep incomplete line in buffer
+
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue;
+      const dataStr = line.slice(6).trim();
+      if (!dataStr) continue;
+
+      try {
+        const data = JSON.parse(dataStr);
+        console.log('[SSE]', data.type, data.text ? data.text.slice(0, 60) : '');
+
+        if (data.type === 'status') {
+          showExecStatus(data.text || '正在调度智能体...');
+          updatePreview(`<div class="preview-loading">⏳ ${data.text || '正在生成攻略...'}</div>`);
+        } else if (data.type === 'requirements_ready') {
+          showRequirementsCard(data.requirements);
+        } else if (data.type === 'checker_result') {
+          showCheckerResult(data.text);
+        } else if (data.type === 'orchestrator_start') {
+          showCompileBar();
+        } else if (data.type === 'budget_warning') {
+          showBudgetWarning(data.summary);
+        } else if (data.type === 'options_ready') {
+          showOptionsCard(data.options);
+        } else if (data.type === 'group_start') {
+          const names = (data.experts || []).map(n => expertDisplayName(n)).join('、');
+          document.getElementById('agentStatusRow').style.display = 'flex';
+          showAgentPanel();
+          showExecStatus(`正在执行第 ${data.group} 组：${names}`);
+          (data.experts || []).forEach(n => {
+            expertStatus[n] = 'pending';
+            updateAgentRowStatus(n, 'pending');
+          });
+          toast(`开始执行专家组 ${data.group}：${names}`, 'info');
+        } else if (data.type === 'expert_start') {
+          expertStatus[data.expert] = 'running';
+          updateAgentPanelStatus(data.expert, 'running');
+          updateAgentRowStatus(data.expert, 'running');
+          renderExpertStatus();
+          showExecStatus(`${expertDisplayName(data.expert)} 正在分析中...`);
+        } else if (data.type === 'expert_done') {
+          expertStatus[data.expert] = 'done';
+          updateAgentPanelStatus(data.expert, 'done', data.result_len || 0);
+          updateAgentRowStatus(data.expert, 'done');
+          renderExpertStatus();
+          expertResults[data.expert] = data.expert;  // mark as present
+        } else if (data.type === 'expert_result_preview') {
+          expertResultsCache[data.expert] = data.preview;
+          addExpertResultMessage(data.expert, data.preview, data.full_len);
+        } else if (data.type === 'expert_error') {
+          expertStatus[data.expert] = 'error';
+          updateAgentPanelStatus(data.expert, 'error');
+          updateAgentRowStatus(data.expert, 'error');
+          toast(`${expertDisplayName(data.expert)} 执行失败：${data.message || ''}`, 'error');
+          renderExpertStatus();
+        } else if (data.type === 'reasoning') {
+          reasoningText += data.text || '';
+          updateStreamingReasoning(reasoningText);
+        } else if (data.type === 'content') {
+          contentText += data.text || '';
+          updateStreamingContent(contentText);
+
+          // Real-time stage inference during streaming
+          const inferred = tryInferStageFromContent(contentText);
+          if (inferred) {
+            const newIdx = STAGE_ORDER.indexOf(inferred);
+            const curIdx = STAGE_ORDER.indexOf(currentStage);
+            if (newIdx > curIdx) {
+              console.log('[Stage] Real-time advance:', currentStage, '->', inferred);
+              updateStageIndicator(inferred);
+            }
+          }
+        } else if (data.type === 'done') {
+          if (data.session_id) currentSessionId = data.session_id;
+          localStorage.setItem('currentSessionId', currentSessionId);
+          updateStageIndicator(data.stage);
+          finishStreamingMessage(contentText, reasoningText);
+
+          hideExecStatus();
+          hideCompileBar();
+
+          const guideStages = ['EXECUTION', 'COMPLETE'];
+          if (guideStages.includes(data.stage)) {
+            updatePreview(contentText);
+            document.getElementById('agentStatusRow').style.display = 'none';
+            hideExecStatus();
+          }
+          // Load persisted expert results when execution completes
+          if (data.stage === 'COMPLETE') {
+            loadExpertResults();
+          }
+          loadSessionList();
+          isStreaming = false;
+          return;
+        } else if (data.type === 'error') {
+          throw new Error(data.message || '流式输出错误');
+        }
+      } catch (e) {
+        // Ignore parse errors for non-JSON lines
+        if (dataStr !== '[DONE]') {
+          console.warn('SSE parse error:', e, 'data:', dataStr);
+        }
+      }
+    }
+  }
+
+  isStreaming = false;
+}
+
+/* ====== Stage Progress ====== */
+function tryInferStageFromContent(text) {
+  const lower = text.toLowerCase();
+  if (lower.includes('正在生成') || lower.includes('攻略生成') || lower.includes('制作攻略')) {
+    return 'EXECUTION';
+  }
+  if (lower.includes('攻略完成') || lower.includes('最终攻略') || lower.includes('祝旅途愉快')) {
+    return 'COMPLETE';
+  }
+  return null;
+}
+
+function updateStageIndicator(stage) {
+  currentStage = stage;
+  const idx = STAGE_ORDER.indexOf(stage);
+
+  document.querySelectorAll('.stage-step').forEach(el => {
+    const s = el.dataset.stage;
+    const sIdx = STAGE_ORDER.indexOf(s);
+    el.classList.remove('active', 'done');
+    if (s === stage) {
+      el.classList.add('active');
+    } else if (sIdx !== -1 && sIdx < idx) {
+      el.classList.add('done');
+    }
+  });
+
+  const inputArea = document.getElementById('chatInputArea');
+  const sendBtn = document.getElementById('sendBtn');
+  if (stage === 'REQUIREMENT_CONFIRMED') {
+    if (inputArea) inputArea.style.display = 'none';
+    if (sendBtn) sendBtn.disabled = true;
+    clearQuickReplies();
+    const optionsCard = document.getElementById('optionsCardEl');
+    if (optionsCard) optionsCard.remove();
+  } else if (stage === 'REQUIREMENT') {
+    if (inputArea) inputArea.style.display = '';
+    if (sendBtn && !isStreaming) sendBtn.disabled = false;
+  } else if (stage === 'EXECUTION') {
+    if (inputArea) inputArea.style.display = 'none';
+    if (sendBtn) sendBtn.disabled = true;
+    clearQuickReplies();
+    const optionsCard = document.getElementById('optionsCardEl');
+    if (optionsCard) optionsCard.remove();
+  } else {
+    if (inputArea) inputArea.style.display = '';
+    if (sendBtn && !isStreaming) sendBtn.disabled = false;
+  }
+}
+
+function showRequirementsCard(reqData) {
+  hideEmptyState();
+  const container = document.getElementById('chatMessages');
+  if (!container) return;
+
+  const existing = document.getElementById('requirementsCard');
+  if (existing) existing.remove();
+
+  const div = document.createElement('div');
+  div.id = 'requirementsCard';
+  div.className = 'requirements-card';
+
+  const req = reqData.requirements || {};
+  const missing = reqData.missing || [];
+  const isComplete = reqData.is_complete;
+
+  const fieldLabels = {
+    destination: '目的地', dates: '出行时间', travelers: '出行人数',
+    budget: '预算范围', origin: '出发城市', transport: '大交通方式',
+    vehicle: '当地交通', accommodation: '住宿偏好', companion_type: '同行关系',
+    interest: '兴趣偏好', pace: '行程节奏', dietary: '饮食禁忌',
+    fitness: '体力水平', special: '特殊需求'
+  };
+
+  let fieldsHtml = '';
+  for (const [key, label] of Object.entries(fieldLabels)) {
+    const val = req[key] || '';
+    const isRequired = ['destination', 'dates', 'travelers', 'budget'].includes(key);
+    const hasVal = val && val.trim();
+    const statusClass = isRequired && !hasVal ? 'req-missing' : (hasVal ? 'req-ok' : 'req-empty');
+    const statusIcon = isRequired && !hasVal ? '⚠️' : (hasVal ? '✅' : '—');
+    fieldsHtml += `
+      <div class="req-field ${statusClass}">
+        <span class="req-label">${isRequired ? '<strong>' + label + '</strong> *' : label}</span>
+        <span class="req-value">${statusIcon} ${hasVal ? val : (isRequired ? '未提供' : '未指定')}</span>
+      </div>
+    `;
+  }
+
+  const warningHtml = !isComplete
+    ? `<div class="req-warning">⚠️ 以下必需信息尚未确认：${missing.join('、')}</div>`
+    : '';
+
+  div.innerHTML = `
+    <div class="req-card-header">
+      <span class="req-card-icon">📋</span>
+      <span class="req-card-title">需求确认</span>
+      <span class="req-card-badge ${isComplete ? 'badge-ok' : 'badge-warn'}">${isComplete ? '完整' : '不完整'}</span>
+    </div>
+    <div class="req-card-body">
+      ${warningHtml}
+      <div class="req-fields-grid">${fieldsHtml}</div>
+    </div>
+    <div class="req-card-actions">
+      <button class="req-btn req-btn-reject" onclick="rejectRequirements()">
+        ✏️ 修改需求
+      </button>
+      ${isComplete ? `
+        <button class="req-btn req-btn-confirm" onclick="confirmRequirements()">
+          ✅ 确认，开始生成攻略
+        </button>
+      ` : `
+        <button class="req-btn req-btn-confirm req-btn-disabled" disabled>
+          ⚠️ 请先补全必需信息
+        </button>
+      `}
+    </div>
+  `;
+
+  container.appendChild(div);
+  scrollToBottom(true);
+}
+
+async function confirmRequirements() {
+  if (!currentSessionId) return;
+  const card = document.getElementById('requirementsCard');
+  if (card) {
+    card.querySelectorAll('.req-btn').forEach(b => b.disabled = true);
+  }
+
+  try {
+    const res = await fetch(`/api/session/${currentSessionId}/confirm-requirements`, { method: 'POST' });
+    const data = await res.json();
+    if (data.stage === 'EXECUTION') {
+      if (card) card.remove();
+      updateStageIndicator('EXECUTION');
+      startExecution();
+    } else {
+      toast('状态异常，请重试', 'error');
+    }
+  } catch (e) {
+    toast('确认失败: ' + e.message, 'error');
+    if (card) {
+      card.querySelectorAll('.req-btn').forEach(b => b.disabled = false);
+    }
+  }
+}
+
+async function rejectRequirements() {
+  if (!currentSessionId) return;
+  const card = document.getElementById('requirementsCard');
+
+  const feedback = prompt('请描述需要修改的内容（可留空直接进入对话）：');
+  if (feedback === null) return;
+
+  // Clear options card if present
+  const optCard = document.getElementById('optionsCardEl');
+  if (optCard) optCard.remove();
+
+  try {
+    const res = await fetch(`/api/session/${currentSessionId}/reject-requirements`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ feedback: feedback || '' })
+    });
+    const data = await res.json();
+    if (data.stage === 'REQUIREMENT') {
+      if (card) card.remove();
+      updateStageIndicator('REQUIREMENT');
+      const inputArea = document.getElementById('chatInputArea');
+      if (inputArea) inputArea.style.display = '';
+      const sendBtn = document.getElementById('sendBtn');
+      if (sendBtn) sendBtn.disabled = false;
+      hideAgentPanel();
+      hideExecStatus();
+      document.getElementById('agentStatusRow').style.display = 'none';
+
+      if (feedback) {
+        addMessage('user', `我想修改一下需求：${feedback}`);
+      } else {
+        addMessage('agent', '好的，请告诉我需要如何调整需求。');
+      }
+      toast('已回到需求修改模式', 'info');
+    } else {
+      toast('状态异常，请重试', 'error');
+    }
+  } catch (e) {
+    toast('操作失败: ' + e.message, 'error');
+  }
+}
+
+async function startExecution() {
+  isStreaming = true;
+  clearQuickReplies();
+  const optCard = document.getElementById('optionsCardEl');
+  if (optCard) optCard.remove();
+  const sendBtn = document.getElementById('sendBtn');
+  if (sendBtn) sendBtn.disabled = true;
+  showAgentPanel();
+  autoOpenAgentPanel();
+  document.getElementById('agentStatusRow').style.display = 'flex';
+
+  try {
+    await streamMessageSSE('确认需求，开始生成攻略');
+  } catch (e) {
+    isStreaming = false;
+    addMessage('agent', '⚠️ ' + e.message);
+    toast('攻略生成失败，请重试', 'error');
+  } finally {
+    if (sendBtn && currentStage !== 'REQUIREMENT_CONFIRMED') sendBtn.disabled = false;
+  }
+}
+
+/* ====== Preview Panel ====== */
+function updatePreview(content) {
+  const panel = document.getElementById('previewContent');
+  if (!panel) return;
+
+  panel.innerHTML = `<div class="markdown-body">${renderMarkdown(stripClientMarkup(content))}</div>`;
+
+  // Highlight code blocks in preview
+  panel.querySelectorAll('pre code').forEach(block => {
+    if (typeof hljs !== 'undefined') hljs.highlightElement(block);
+  });
+}
+
+/* ====== Mobile Tab Switching ====== */
+function switchMobileTab(tab) {
+  document.querySelectorAll('.mobile-tab').forEach(t => t.classList.remove('active'));
+  document.querySelector(`.mobile-tab[data-tab="${tab}"]`)?.classList.add('active');
+
+  const chatPanel = document.getElementById('chatPanel');
+  const previewPanel = document.getElementById('previewPanel');
+
+  if (tab === 'chat') {
+    previewPanel?.classList.remove('active');
+    chatPanel?.style.setProperty('display', 'flex');
+  } else {
+    previewPanel?.classList.add('active');
+    chatPanel?.style.setProperty('display', 'none');
+  }
+}
+
+/* ====== Session Management ====== */
+function newSession() {
+  currentSessionId = null;
+  currentStage = 'INIT';
+  const container = document.getElementById('chatMessages');
+  if (container) {
+    container.innerHTML = `
+      <div class="empty-state" id="emptyState">
+        <div class="empty-icon">🗺️</div>
+        <div class="empty-title">开始规划你的旅行</div>
+        <div class="empty-desc">告诉我目的地、时间和人数，我来帮你制作攻略</div>
+        <div class="empty-examples">
+          <button onclick="fillInput('我想去贵州，6月19日到23日，2个人')">贵州 5天4晚</button>
+          <button onclick="fillInput('计划去云南，7月初，一家三口')">云南 亲子游</button>
+          <button onclick="fillInput('国庆去新疆，4个人自驾')">新疆 国庆自驾</button>
+        </div>
+      </div>
+    `;
+  }
+  updatePreview('');
+  updateStageIndicator('INIT');
+  hideAgentPanel();
+  hideExecStatus();
+  document.getElementById('agentStatusRow').style.display = 'none';
+  expertResults = {};
+  expertStatus = {};
+  renderExpertResults();
+  localStorage.removeItem('currentSessionId');
+  loadSessionList();
+  toast('已创建新会话', 'info');
+}
+
+/* ====== Checker ====== */
+async function runChecker() {
+  if (!currentSessionId) {
+    toast('请先生成攻略', 'info');
+    return;
+  }
+  toast('正在检查攻略质量...', 'info');
+  try {
+    const checkRes = await fetch(`/api/session/${currentSessionId}/check`, { method: 'POST' });
+    const data = await checkRes.json();
+    if (data.result) {
+      addMessage('agent', '**检查报告**\n\n' + data.result);
+      toast('检查完成', 'success');
+    } else {
+      toast('检查未返回结果', 'warning');
+    }
+  } catch (e) {
+    toast('检查失败: ' + e.message, 'error');
+  }
+}
+
+function showCheckerResult(text) {
+  if (!text) return;
+  const container = document.getElementById('chatMessages');
+  if (!container) return;
+
+  const existing = document.getElementById('checkerResultMsg');
+  if (existing) existing.remove();
+
+  const div = document.createElement('div');
+  div.id = 'checkerResultMsg';
+  div.className = 'message message-agent';
+
+  const hasCritical = text.includes('[CRITICAL]');
+  const headerClass = hasCritical ? 'checker-warn' : 'checker-ok';
+
+  div.innerHTML = `
+    <div class="message-avatar">🔍</div>
+    <div class="message-body">
+      <div class="message-role">攻略检查师</div>
+      <div class="message-bubble checker-bubble">
+        <div class="checker-header ${headerClass}">
+          <span>${hasCritical ? '⚠️ 发现需要关注的问题' : '✅ 攻略质量检查通过'}</span>
+        </div>
+        <div class="checker-content markdown-body">${renderMarkdown(text)}</div>
+        <div class="checker-actions">
+          <button class="msg-action-btn" onclick="toggleCheckerDetail(this)">展开/收起</button>
+          <button class="msg-action-btn" onclick="copyCheckerResult()">复制报告</button>
+          ${hasCritical ? '<button class="msg-action-btn btn-primary" onclick="fixGuideFromChecker()">自动修正</button>' : ''}
+        </div>
+      </div>
+    </div>
+  `;
+
+  container.appendChild(div);
+  scrollToBottom(true);
+}
+
+function toggleCheckerDetail(btn) {
+  const content = btn.closest('.checker-bubble')?.querySelector('.checker-content');
+  if (content) {
+    content.classList.toggle('collapsed');
+  }
+}
+
+function copyCheckerResult() {
+  const el = document.getElementById('checkerResultMsg');
+  const content = el?.querySelector('.checker-content')?.textContent || '';
+  navigator.clipboard.writeText(content).then(() => toast('报告已复制', 'success'));
+}
+
+async function fixGuideFromChecker() {
+  if (!currentSessionId) return;
+  toast('正在根据检查结果修正攻略...', 'info');
+  try {
+    const res = await fetch(`/api/session/${currentSessionId}/regenerate-guide`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({})
+    });
+    const data = await res.json();
+    if (data.content_md) {
+      updatePreview(data.content_md);
+      addMessage('agent', data.content_md);
+      toast('攻略已修正', 'success');
+    }
+  } catch (e) {
+    toast('修正失败: ' + e.message, 'error');
+  }
+}
+
+function showBudgetWarning(summary) {
+  if (!summary || !summary.warnings || summary.warnings.length === 0) return;
+  const warnings = summary.warnings;
+  const estimated = summary.estimated || {};
+  const budgetTotal = summary.budget_total || 0;
+  const estimatedTotal = summary.estimated_total || 0;
+
+  const container = document.getElementById('chatMessages');
+  if (!container) return;
+
+  const existing = document.getElementById('budgetWarningMsg');
+  if (existing) existing.remove();
+
+  const div = document.createElement('div');
+  div.id = 'budgetWarningMsg';
+  div.className = 'message message-agent';
+
+  const items = Object.entries(estimated)
+    .filter(([, v]) => v > 0)
+    .map(([k, v]) => `<div class="budget-item"><span>${k}</span><span>${v}元</span></div>`)
+    .join('');
+
+  div.innerHTML = `
+    <div class="message-avatar">💰</div>
+    <div class="message-body">
+      <div class="message-role">预算分析</div>
+      <div class="message-bubble budget-bubble">
+        <div class="budget-header">
+          <span>📊 预算预估分析</span>
+          ${budgetTotal > 0 ? `<span class="budget-total">预算 ${budgetTotal}元 / 预估 ${estimatedTotal}元</span>` : ''}
+        </div>
+        <div class="budget-items">${items || '<div class="budget-empty">未能提取完整价格信息</div>'}</div>
+        ${warnings.map(w => `<div class="budget-warning-item">⚠️ ${w}</div>`).join('')}
+      </div>
+    </div>
+  `;
+
+  container.appendChild(div);
+  scrollToBottom(true);
+}
+
+/* ====== Export ====== */
+async function exportGuide(format) {
+  if (!currentSessionId) {
+    toast('请先生成攻略', 'info');
+    return;
+  }
+
+  try {
+    const res = await fetch(`/api/session/${currentSessionId}/export`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ format })
+    });
+
+    const data = await res.json();
+    if (data.error) {
+      toast(data.error, 'error');
+      return;
+    }
+
+    if (format === 'html') {
+      const blob = new Blob([data.content], { type: 'text/html' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'travel-guide.html';
+      a.click();
+      URL.revokeObjectURL(url);
+      toast('HTML 已导出', 'success');
+    } else if (format === 'pdf') {
+      toast('PDF 已生成: ' + data.pdf_path, 'success');
+    }
+  } catch (e) {
+    toast('导出失败: ' + e.message, 'error');
+  }
+}
+
+/* ====== Utilities ====== */
+function copyMessage(btn) {
+  const bubble = btn.closest('.message-body')?.querySelector('.message-bubble');
+  if (!bubble) return;
+  const text = bubble.dataset.raw || bubble.textContent;
+  navigator.clipboard.writeText(text).then(() => {
+    const orig = btn.textContent;
+    btn.textContent = '已复制';
+    setTimeout(() => btn.textContent = orig, 1500);
+  });
+}
+
+function copyCode(btn) {
+  const code = btn.closest('pre')?.querySelector('code');
+  if (!code) return;
+  navigator.clipboard.writeText(code.textContent).then(() => {
+    const orig = btn.textContent;
+    btn.textContent = '已复制';
+    setTimeout(() => btn.textContent = orig, 1500);
+  });
+}
+
+function toast(message, type = 'info', duration = 3000) {
+  const container = document.getElementById('toastContainer');
+  if (!container) return;
+
+  const div = document.createElement('div');
+  div.className = `toast ${type}`;
+
+  const icons = { success: '✓', error: '✕', info: 'ℹ' };
+  div.innerHTML = `<span>${icons[type] || 'ℹ'}</span> ${message}`;
+
+  container.appendChild(div);
+
+  setTimeout(() => {
+    div.style.opacity = '0';
+    div.style.transform = 'translateX(30px)';
+    setTimeout(() => div.remove(), 300);
+  }, duration);
+}
+
+/* ====== Session Loading ====== */
+async function loadSessionHistory(sessionId) {
+  console.log('[History] Loading session:', sessionId);
+  try {
+    const res = await fetch(`/api/chat/history/${sessionId}`);
+    const messages = await res.json();
+    console.log('[History] Loaded', messages.length, 'messages');
+
+    const container = document.getElementById('chatMessages');
+
+    if (messages.length === 0) {
+      console.log('[History] No messages, showing empty state');
+      container.innerHTML = `
+        <div class="empty-state" id="emptyState">
+          <div class="empty-icon">🗺️</div>
+          <div class="empty-title">开始规划你的旅行</div>
+          <div class="empty-desc">告诉我目的地、时间和人数，我来帮你制作攻略</div>
+          <div class="empty-examples">
+            <button onclick="fillInput('我想去贵州，6月19日到23日，2个人')">贵州 5天4晚</button>
+            <button onclick="fillInput('计划去云南，7月初，一家三口')">云南 亲子游</button>
+            <button onclick="fillInput('国庆去新疆，4个人自驾')">新疆 国庆自驾</button>
+          </div>
+        </div>
+      `;
+      return false;
+    }
+
+    container.innerHTML = '';
+    let lastStage = 'INIT';
+    for (const msg of messages) {
+      if (msg.role === 'user') {
+        addMessage('user', msg.message);
+      } else if (msg.role === 'planner') {
+        addMessage('agent', msg.message);
+      }
+      if (msg.stage) lastStage = msg.stage;
+    }
+    updateStageIndicator(lastStage);
+    console.log('[History] Rendered messages, stage:', lastStage);
+
+    if (lastStage === 'REQUIREMENT_CONFIRMED') {
+      try {
+        const reqRes = await fetch(`/api/session/${sessionId}/requirements`);
+        if (reqRes.ok) {
+          const reqData = await reqRes.json();
+          showRequirementsCard(reqData);
+        }
+      } catch (e) {
+        console.warn('Failed to load requirements:', e);
+      }
+    }
+
+    const guideStages = ['EXECUTION', 'CHECKING', 'FINAL_OUTPUT', 'COMPLETE'];
+    if (guideStages.includes(lastStage)) {
+      const inputArea = document.getElementById('chatInputArea');
+      if (inputArea) inputArea.style.display = 'none';
+      const sendBtn = document.getElementById('sendBtn');
+      if (sendBtn) sendBtn.disabled = true;
+      let previewLoaded = false;
+      try {
+        const guideRes = await fetch(`/api/session/${sessionId}/guide`);
+        if (guideRes.ok) {
+          const guide = await guideRes.json();
+          if (guide.content_md) {
+            updatePreview(guide.content_md);
+            previewLoaded = true;
+          }
+        }
+      } catch (e) {
+        console.warn('Failed to load guide preview:', e);
+      }
+
+      // Fallback: 从历史消息中提取攻略正文（兼容修复前建立的会话）
+      if (!previewLoaded) {
+        let guideContent = '';
+        for (let i = messages.length - 1; i >= 0; i--) {
+          const msg = messages[i];
+          if (msg.role === 'planner' && guideStages.includes(msg.stage)) {
+            guideContent = msg.message;
+            break;
+          }
+        }
+        if (guideContent) {
+          updatePreview(guideContent);
+        }
+      }
+      // Load expert results if available
+      loadExpertResults();
+    }
+    return true;
+  } catch (e) {
+    console.error('Failed to load history:', e);
+    return false;
+  }
+}
+
+async function loadSessionList() {
+  try {
+    const res = await fetch('/api/sessions');
+    const sessions = await res.json();
+    const listEl = document.getElementById('sessionList');
+    if (!listEl) return;
+    listEl.innerHTML = '';
+
+    if (sessions.length === 0) {
+      listEl.innerHTML = `
+        <div class="session-item active" data-session="">
+          <div class="session-title">当前会话</div>
+          <div class="session-meta">INIT</div>
+        </div>`;
+      return;
+    }
+
+    for (const s of sessions) {
+      const div = document.createElement('div');
+      div.className = 'session-item';
+      if (s.session_id === currentSessionId) div.classList.add('active');
+      div.dataset.session = s.session_id;
+      const dateStr = s.last_at ? new Date(s.last_at).toLocaleDateString('zh-CN') : '';
+      div.innerHTML = `
+        <div class="session-title">会话 ${s.session_id}</div>
+        <div class="session-meta">${dateStr} · ${s.msg_count} 条消息</div>
+      `;
+      div.onclick = () => switchSession(s.session_id);
+      listEl.appendChild(div);
+    }
+  } catch (e) {
+    console.error('Failed to load sessions:', e);
+  }
+}
+
+function switchSession(sessionId) {
+  currentSessionId = sessionId;
+  localStorage.setItem('currentSessionId', sessionId);
+  updatePreview('');
+  expertResults = {};
+  expertStatus = {};
+  renderExpertResults();
+  hideAgentPanel();
+  hideExecStatus();
+  document.getElementById('agentStatusRow').style.display = 'none';
+  loadSessionHistory(sessionId);
+  loadSessionList();
+}
+
+/* ====== Expert Results Panel ====== */
+const EXPERT_META = {
+  hotel_expert: { name: '酒店规划', icon: '🏨' },
+  scene_expert: { name: '景点规划', icon: '🎡' },
+  food_expert: { name: '美食推荐', icon: '🍜' },
+  route_expert: { name: '路线规划', icon: '🚗' },
+};
+
+function expertDisplayName(key) {
+  return EXPERT_META[key]?.name || key;
+}
+
+function expertIcon(key) {
+  return EXPERT_META[key]?.icon || '🔧';
+}
+
+async function loadExpertResults() {
+  if (!currentSessionId) return;
+  try {
+    const res = await fetch(`/api/session/${currentSessionId}/guide`);
+    if (!res.ok) return;
+    const guide = await res.json();
+    if (guide.expert_results) {
+      expertResults = guide.expert_results;
+    }
+    renderExpertResults();
+  } catch (e) {
+    console.warn('Failed to load expert results:', e);
+  }
+}
+
+function renderExpertStatus() {
+  const summary = document.getElementById('expertStatusSummary');
+  if (!summary) return;
+  const total = Object.keys(expertStatus).length;
+  const done = Object.values(expertStatus).filter(s => s === 'done').length;
+  const error = Object.values(expertStatus).filter(s => s === 'error').length;
+  if (total === 0) {
+    summary.textContent = '';
+    return;
+  }
+  summary.textContent = `${done}/${total} 完成${error > 0 ? ` · ${error} 失败` : ''}`;
+}
+
+function renderExpertResults() {
+  const panel = document.getElementById('expertPanel');
+  const list = document.getElementById('expertList');
+  if (!panel || !list) return;
+
+  const resultKeys = Object.keys(expertResults);
+  const statusKeys = Object.keys(expertStatus);
+  const allKeys = [...new Set([...resultKeys, ...statusKeys])];
+  if (allKeys.length === 0) {
+    panel.style.display = 'none';
+    return;
+  }
+  panel.style.display = '';
+
+  list.innerHTML = allKeys.map(key => {
+    const status = expertStatus[key] || 'done';
+    const content = expertResults[key] || '';
+    const display = expertDisplayName(key);
+    const icon = expertIcon(key);
+    const statusClass = status === 'error' ? 'status-error' : status === 'running' ? 'status-running' : 'status-done';
+    const statusText = status === 'error' ? '失败' : status === 'running' ? '执行中' : '完成';
+    const shortContent = content.slice(0, 200).replace(/\n/g, ' ');
+    return `
+      <div class="expert-card" data-expert="${key}">
+        <div class="expert-card-header" onclick="toggleExpertCard('${key}')">
+          <span class="expert-card-icon">${icon}</span>
+          <span class="expert-card-title">${display}</span>
+          <span class="expert-card-status ${statusClass}">${statusText}</span>
+          <span class="expert-card-toggle">▶</span>
+        </div>
+        <div class="expert-card-body" id="expert-body-${key}" style="display:none;">
+          <div class="expert-card-preview">${simpleFormat(shortContent)}${content.length > 200 ? '...' : ''}</div>
+          <div class="expert-card-edit" style="display:none;">
+            <textarea class="expert-edit-area" id="expert-edit-${key}" rows="6">${escapeHtml(content)}</textarea>
+            <div class="expert-edit-actions">
+              <button class="btn-sm btn-primary" onclick="saveExpertEdit('${key}')">保存</button>
+              <button class="btn-sm" onclick="cancelExpertEdit('${key}')">取消</button>
+            </div>
+          </div>
+          <div class="expert-card-actions">
+            <button class="btn-sm" onclick="toggleExpertEdit('${key}')">✏️ 编辑</button>
+            <button class="btn-sm" onclick="rerunExpert('${key}')">🔄 重新运行</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  renderExpertStatus();
+}
+
+function toggleExpertCard(key) {
+  const body = document.getElementById(`expert-body-${key}`);
+  const card = document.querySelector(`.expert-card[data-expert="${key}"]`);
+  const toggle = card?.querySelector('.expert-card-toggle');
+  if (!body) return;
+  const isHidden = body.style.display === 'none';
+  body.style.display = isHidden ? 'block' : 'none';
+  if (toggle) toggle.textContent = isHidden ? '▼' : '▶';
+}
+
+function toggleExpertEdit(key) {
+  const card = document.querySelector(`.expert-card[data-expert="${key}"]`);
+  const preview = card?.querySelector('.expert-card-preview');
+  const edit = card?.querySelector('.expert-card-edit');
+  if (!preview || !edit) return;
+  const isHidden = edit.style.display === 'none';
+  preview.style.display = isHidden ? 'none' : 'block';
+  edit.style.display = isHidden ? 'block' : 'none';
+}
+
+function cancelExpertEdit(key) {
+  toggleExpertEdit(key);
+}
+
+function saveExpertEdit(key) {
+  const textarea = document.getElementById(`expert-edit-${key}`);
+  if (!textarea) return;
+  expertResults[key] = textarea.value;
+  renderExpertResults();
+  toast('已保存本地修改，点击"重新生成攻略"生效', 'success');
+}
+
+async function rerunExpert(key) {
+  if (!currentSessionId) return;
+  toast(`正在重新运行 ${expertDisplayName(key)}...`, 'info');
+  expertStatus[key] = 'running';
+  renderExpertResults();
+  try {
+    const res = await fetch(`/api/session/${currentSessionId}/rerun-expert`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expert_name: key, expert_results: expertResults }),
+    });
+    const data = await res.json();
+    if (data.error) {
+      toast(data.error, 'error');
+      expertStatus[key] = 'error';
+    } else {
+      expertResults[key] = data.result;
+      expertStatus[key] = 'done';
+      toast(`${expertDisplayName(key)} 重新运行完成`, 'success');
+    }
+  } catch (e) {
+    toast('重新运行失败: ' + e.message, 'error');
+    expertStatus[key] = 'error';
+  }
+  renderExpertResults();
+}
+
+async function regenerateGuideFromExperts() {
+  if (!currentSessionId) return;
+  if (Object.keys(expertResults).length === 0) {
+    toast('暂无专家结果，无法重新生成', 'warning');
+    return;
+  }
+  toast('正在重新生成攻略...', 'info');
+  try {
+    const res = await fetch(`/api/session/${currentSessionId}/regenerate-guide`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expert_results: expertResults }),
+    });
+    const data = await res.json();
+    if (data.error) {
+      toast(data.error, 'error');
+      return;
+    }
+    updatePreview(data.content_md);
+    toast('攻略已重新生成', 'success');
+  } catch (e) {
+    toast('重新生成失败: ' + e.message, 'error');
+  }
+}
+
+function escapeHtml(text) {
+  if (!text) return '';
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+/* ====== Init ====== */
+document.addEventListener('DOMContentLoaded', async () => {
+  initMarked();
+  updateStageIndicator('INIT');
+  await loadSessionList();
+
+  const savedSessionId = localStorage.getItem('currentSessionId');
+  let loaded = false;
+
+  if (savedSessionId) {
+    console.log('[Init] Found saved session:', savedSessionId);
+    currentSessionId = savedSessionId;
+    loaded = await loadSessionHistory(savedSessionId);
+    if (!loaded) {
+      console.log('[Init] Saved session empty, will try fallback');
+      localStorage.removeItem('currentSessionId');
+    }
+  }
+
+  if (!loaded) {
+    console.log('[Init] Trying to auto-load most recent session');
+    const listEl = document.getElementById('sessionList');
+    const firstItem = listEl?.querySelector('.session-item[data-session]');
+    const sid = firstItem?.dataset?.session;
+    if (sid) {
+      console.log('[Init] Auto-loading recent session:', sid);
+      currentSessionId = sid;
+      localStorage.setItem('currentSessionId', sid);
+      await loadSessionHistory(sid);
+      loadSessionList();
+    } else {
+      console.log('[Init] No sessions available, staying on empty state');
+    }
+  }
+});

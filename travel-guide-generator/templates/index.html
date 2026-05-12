@@ -1,0 +1,471 @@
+{% extends "base.html" %}
+{% block title %}Travel Guide Generator - Chat{% endblock %}
+{% block content %}
+
+<!-- Mobile Tab Bar -->
+<div class="mobile-tabs" id="mobileTabs">
+  <button class="mobile-tab active" data-tab="chat" onclick="switchMobileTab('chat')">
+    <svg width="20" height="20"><use href="#icon-chat"/></svg> 聊天
+  </button>
+  <button class="mobile-tab" data-tab="preview" onclick="switchMobileTab('preview')">
+    <svg width="20" height="20"><use href="#icon-document"/></svg> 预览
+  </button>
+</div>
+
+<div class="app-layout" id="appLayout">
+
+  <!-- Sidebar: Session List -->
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-header">
+      <button class="new-session-btn" onclick="newSession()">
+        <span>+</span> 新建会话
+      </button>
+    </div>
+    <div class="session-list" id="sessionList">
+      <div class="session-item active" data-session="">
+        <div class="session-title">当前会话</div>
+        <div class="session-meta">INIT</div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Chat Panel -->
+  <main class="chat-panel" id="chatPanel">
+
+    <!-- Stage Progress Bar -->
+    <div class="stage-progress" id="stageProgress">
+      <div class="stage-track">
+        <div class="stage-step" data-stage="REQUIREMENT">
+          <div class="stage-dot"></div>
+          <div class="stage-label">需求收集</div>
+        </div>
+        <div class="stage-step" data-stage="REQUIREMENT_CONFIRMED">
+          <div class="stage-dot"></div>
+          <div class="stage-label">需求确认</div>
+        </div>
+        <div class="stage-step" data-stage="EXECUTION">
+          <div class="stage-dot"></div>
+          <div class="stage-label">攻略生成</div>
+        </div>
+        <div class="stage-step" data-stage="COMPLETE">
+          <div class="stage-dot"></div>
+          <div class="stage-label">完成</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Agent Status Row (shows during execution) -->
+    <div class="agent-status-row" id="agentStatusRow" style="display:none;">
+      <div class="agent-status-item" data-agent="scene_expert">
+        <div class="agent-status-dot" id="dot-scene_expert"></div>
+        <span><svg width="16" height="16"><use href="#icon-mountain"/></svg> 景点</span>
+      </div>
+      <div class="agent-status-item" data-agent="hotel_expert">
+        <div class="agent-status-dot" id="dot-hotel_expert"></div>
+        <span><svg width="16" height="16"><use href="#icon-building"/></svg> 酒店</span>
+      </div>
+      <div class="agent-status-item" data-agent="food_expert">
+        <div class="agent-status-dot" id="dot-food_expert"></div>
+        <span><svg width="16" height="16"><use href="#icon-food"/></svg> 美食</span>
+      </div>
+      <div class="agent-status-item" data-agent="route_expert">
+        <div class="agent-status-dot" id="dot-route_expert"></div>
+        <span><svg width="16" height="16"><use href="#icon-car"/></svg> 路线</span>
+      </div>
+    </div>
+
+    <!-- Execution Status Message -->
+    <div class="exec-status-msg" id="execStatusMsg" style="display:none;">
+      <div class="exec-status-spinner"></div>
+      <span id="execStatusText">正在调度智能体...</span>
+    </div>
+
+    <!-- Execution Logs Bar -->
+    <div class="exec-logs-bar" id="execLogsBar">
+      <button class="exec-logs-toggle" onclick="toggleExecLogs()">
+        <span id="execLogsIcon">▶</span> 执行日志
+        <span class="exec-logs-count" id="execLogsCount"></span>
+      </button>
+      <div class="exec-logs-panel" id="execLogsPanel" style="display:none;">
+        <div class="exec-logs-header">
+          <span>智能体调用链路</span>
+          <button class="btn-icon" onclick="refreshExecLogs()" title="刷新"><svg width="16" height="16"><use href="#icon-refresh"/></svg></button>
+        </div>
+        <div class="exec-logs-list" id="execLogsList">
+          <div class="exec-logs-empty">暂无执行记录</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Messages Area -->
+    <div class="chat-messages" id="chatMessages">
+      <div class="empty-state" id="emptyState">
+        <div class="empty-icon"><svg width="64" height="64"><use href="#icon-map"/></svg></div>
+        <div class="empty-title">开始规划你的旅行</div>
+        <div class="empty-desc">告诉我目的地、时间和人数，我来帮你制作攻略</div>
+        <div class="empty-examples">
+          <button onclick="fillInput('我想去贵州，6月19日到23日，2个人')">贵州 5天4晚</button>
+          <button onclick="fillInput('计划去云南，7月初，一家三口')">云南 亲子游</button>
+          <button onclick="fillInput('国庆去新疆，4个人自驾')">新疆 国庆自驾</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Quick Replies -->
+    <div class="quick-replies" id="quickReplies" style="display:none;"></div>
+
+    <!-- Input Area -->
+    <div class="chat-input-area" id="chatInputArea">
+      <div class="input-wrap">
+        <textarea
+          id="messageInput"
+          placeholder="输入消息..."
+          rows="1"
+          oninput="autoResize(this)"
+          onkeydown="handleKeydown(event)"
+        ></textarea>
+        <button id="sendBtn" onclick="sendMessage()" title="发送">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+        </button>
+      </div>
+    </div>
+  </main>
+
+  <!-- Preview Panel -->
+  <aside class="preview-panel" id="previewPanel">
+    <div class="preview-header">
+      <div class="preview-title">
+        <svg width="18" height="18"><use href="#icon-document"/></svg> 攻略预览
+      </div>
+      <div class="preview-actions">
+        <button class="btn-icon" onclick="exportGuide('html')" title="导出 HTML">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+        </button>
+        <button class="btn-icon" onclick="exportGuide('pdf')" title="导出 PDF">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
+        </button>
+      </div>
+    </div>
+    <div class="preview-content markdown-body" id="previewContent">
+      <div class="preview-empty">
+        <div class="preview-empty-icon"><svg width="40" height="40"><use href="#icon-document"/></svg></div>
+        <div>攻略内容在生成过程中会实时预览</div>
+        <div class="preview-empty-hint">确认需求后自动开始生成</div>
+      </div>
+    </div>
+  </aside>
+
+</div>
+
+<!-- Floating Agent Collaboration Panel (shown during execution) -->
+<div class="agent-panel-collapsed" id="agentPanelCollapsed" style="display:none;" onclick="toggleAgentPanel()">
+  <svg width="22" height="22"><use href="#icon-cpu"/></svg>
+  <div class="agent-pulse-dot" id="agentPulseDot" style="display:none;"></div>
+</div>
+<div class="agent-panel" id="agentPanel" style="display:none;">
+  <div class="agent-panel-header">
+    <div class="agent-panel-title">
+      <svg width="18" height="18"><use href="#icon-cpu"/></svg> 智能体协同中心
+    </div>
+    <div class="agent-panel-summary" id="agentPanelSummary">等待启动</div>
+    <button class="agent-panel-close" onclick="toggleAgentPanel()"><svg width="14" height="14"><use href="#icon-xmark"/></svg></button>
+  </div>
+  <div class="agent-panel-body" id="agentPanelBody">
+    <!-- Dependency chain visualization -->
+    <div class="agent-chain">
+      <div class="chain-node" data-agent="scene_expert">
+        <div class="chain-icon"><svg width="18" height="18"><use href="#icon-mountain"/></svg></div>
+        <div class="chain-label">景点</div>
+        <div class="chain-status" id="chain-status-scene_expert">⏳</div>
+      </div>
+      <div class="chain-arrow">→</div>
+      <div class="chain-node" data-agent="hotel_expert">
+        <div class="chain-icon"><svg width="18" height="18"><use href="#icon-building"/></svg></div>
+        <div class="chain-label">酒店</div>
+        <div class="chain-status" id="chain-status-hotel_expert">⏳</div>
+      </div>
+      <div class="chain-arrow">→</div>
+      <div class="chain-node" data-agent="food_expert">
+        <div class="chain-icon"><svg width="18" height="18"><use href="#icon-food"/></svg></div>
+        <div class="chain-label">美食</div>
+        <div class="chain-status" id="chain-status-food_expert">⏳</div>
+      </div>
+      <div class="chain-arrow">→</div>
+      <div class="chain-node" data-agent="route_expert">
+        <div class="chain-icon"><svg width="18" height="18"><use href="#icon-car"/></svg></div>
+        <div class="chain-label">路线</div>
+        <div class="chain-status" id="chain-status-route_expert">⏳</div>
+      </div>
+    </div>
+    <!-- Orchestrator compilation bar -->
+    <div class="agent-compile-bar" id="agentCompileBar" style="display:none;">
+      <div class="compile-icon"><svg width="18" height="18"><use href="#icon-cpu"/></svg></div>
+      <div class="compile-text">智能调度师正在汇总审核专家结果...</div>
+      <div class="compile-spinner"></div>
+    </div>
+    <!-- Token usage summary -->
+    <div class="agent-token-summary" id="agentTokenSummary" style="display:none;">
+    </div>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+<script>
+let execLogsExpanded = false;
+let expandedLogIds = new Set();
+let expertTimings = {};
+let expertResultLens = {};
+
+function toggleAgentPanel() {
+  const panel = document.getElementById('agentPanel');
+  const collapsed = document.getElementById('agentPanelCollapsed');
+  const isVisible = panel.style.display !== 'none' && panel.style.display !== '';
+  if (isVisible) {
+    panel.style.display = 'none';
+    collapsed.style.display = 'flex';
+  } else {
+    panel.style.display = 'flex';
+    collapsed.style.display = 'none';
+  }
+}
+
+function showAgentPanel() {
+  document.getElementById('agentPanelCollapsed').style.display = 'flex';
+  document.getElementById('agentPanel').style.display = 'none';
+  resetAgentPanel();
+}
+
+function hideAgentPanel() {
+  document.getElementById('agentPanelCollapsed').style.display = 'none';
+  document.getElementById('agentPanel').style.display = 'none';
+}
+
+function autoOpenAgentPanel() {
+  document.getElementById('agentPanel').style.display = 'flex';
+  document.getElementById('agentPanelCollapsed').style.display = 'none';
+}
+
+function resetAgentPanel() {
+  expertTimings = {};
+  expertResultLens = {};
+  document.querySelectorAll('.chain-node').forEach(node => {
+    node.className = 'chain-node';
+    const status = node.querySelector('.chain-status');
+    if (status) { status.textContent = '⏳'; status.className = 'chain-status'; }
+  });
+  document.getElementById('agentPanelSummary').textContent = '等待启动';
+  document.getElementById('agentCompileBar').style.display = 'none';
+  document.getElementById('agentTokenSummary').style.display = 'none';
+  document.getElementById('agentPulseDot').style.display = 'none';
+}
+
+function updateAgentPanelStatus(agentName, status, resultLen) {
+  const node = document.querySelector(`.chain-node[data-agent="${agentName}"]`);
+  const statusEl = document.getElementById('chain-status-' + agentName);
+  if (!node || !statusEl) return;
+  node.className = 'chain-node ' + status;
+  if (status === 'running') {
+    statusEl.innerHTML = '<svg width="14" height="14"><use href="#icon-refresh"/></svg>';
+    document.getElementById('agentPulseDot').style.display = '';
+  } else if (status === 'done') {
+    statusEl.innerHTML = '<svg width="14" height="14"><use href="#icon-checkmark"/></svg>';
+    if (resultLen) expertResultLens[agentName] = resultLen;
+  } else if (status === 'error') {
+    statusEl.innerHTML = '<svg width="14" height="14"><use href="#icon-xmark"/></svg>';
+  }
+  updatePanelSummary();
+  updateTokenSummary();
+}
+
+function updatePanelSummary() {
+  const nodes = document.querySelectorAll('.chain-node');
+  let done = 0, running = 0, pending = 0;
+  nodes.forEach(n => {
+    if (n.classList.contains('done')) done++;
+    else if (n.classList.contains('running')) running++;
+    else pending++;
+  });
+  const summary = document.getElementById('agentPanelSummary');
+  const total = nodes.length;
+  if (done === total) summary.innerHTML = '全部完成 <svg width="14" height="14"><use href="#icon-checkmark"/></svg>';
+  else if (running > 0) summary.textContent = `${done}/${total} 完成 · ${running} 运行中`;
+  else summary.textContent = `${done}/${total} 完成`;
+}
+
+function showCompileBar() {
+  document.getElementById('agentCompileBar').style.display = 'flex';
+  document.getElementById('agentPanelSummary').textContent = '汇总中...';
+}
+function hideCompileBar() {
+  document.getElementById('agentCompileBar').style.display = 'none';
+}
+
+function updateTokenSummary() {
+  const summary = document.getElementById('agentTokenSummary');
+  if (!summary) return;
+  const entries = Object.entries(expertResultLens);
+  if (entries.length === 0) { summary.style.display = 'none'; return; }
+  summary.style.display = 'grid';
+  const nameMap = {'scene_expert':'景点','hotel_expert':'酒店','food_expert':'美食','route_expert':'路线'};
+  let totalChars = 0;
+  let html = '';
+  entries.forEach(([name, len]) => {
+    const display = nameMap[name] || name;
+    const estTokens = Math.round(len * 0.4);
+    html += `<div class="token-item"><span class="token-label">${display}</span><span class="token-value">~${estTokens} tokens</span></div>`;
+    totalChars += len;
+  });
+  html += `<div class="token-item" style="font-weight:600;border-top:1px solid var(--border);padding-top:4px;grid-column:1/-1;"><span class="token-label">合计 ~${Math.round(totalChars * 0.4)} tokens</span></div>`;
+  summary.innerHTML = html;
+}
+
+function updateAgentRowStatus(agentName, status) {
+  const dot = document.getElementById('dot-' + agentName);
+  if (dot) {
+    dot.className = 'agent-status-dot ' + status;
+  }
+}
+
+function showExecStatus(msg) {
+  const row = document.getElementById('execStatusMsg');
+  const text = document.getElementById('execStatusText');
+  if (row && text) {
+    row.style.display = 'flex';
+    text.textContent = msg;
+  }
+}
+
+function hideExecStatus() {
+  const row = document.getElementById('execStatusMsg');
+  if (row) row.style.display = 'none';
+}
+
+
+function toggleExecLogs() {
+  execLogsExpanded = !execLogsExpanded;
+  const panel = document.getElementById('execLogsPanel');
+  const icon = document.getElementById('execLogsIcon');
+  panel.style.display = execLogsExpanded ? 'block' : 'none';
+  icon.textContent = execLogsExpanded ? '▼' : '▶';
+  if (execLogsExpanded && currentSessionId) {
+    refreshExecLogs();
+  }
+}
+
+async function refreshExecLogs() {
+  if (!currentSessionId) {
+    document.getElementById('execLogsList').innerHTML = '<div class="exec-logs-empty">请先开始一个会话</div>';
+    return;
+  }
+  try {
+    const res = await fetch(`/api/sessions/${currentSessionId}/execution-logs`);
+    const logs = await res.json();
+    renderExecLogs(logs);
+  } catch (e) {
+    console.error('Failed to load logs:', e);
+  }
+}
+
+function renderExecLogs(logs) {
+  const container = document.getElementById('execLogsList');
+  const countEl = document.getElementById('execLogsCount');
+  countEl.textContent = logs.length > 0 ? `(${logs.length})` : '';
+
+  if (logs.length === 0) {
+    container.innerHTML = '<div class="exec-logs-empty">暂无执行记录</div>';
+    return;
+  }
+
+  const chains = buildCallChains(logs);
+
+  container.innerHTML = chains.map((chain, idx) => {
+    const isExpanded = expandedLogIds.has('chain-' + idx);
+    const orchestratorLog = chain.orchestrator;
+    const expertLogs = chain.experts || [];
+
+    const time = new Date(orchestratorLog.created_at).toLocaleTimeString('zh-CN', {hour: '2-digit', minute: '2-digit', second: '2-digit'});
+    const statusColor = orchestratorLog.status === 'success' ? 'success' : orchestratorLog.status === 'error' ? 'error' : 'running';
+
+    return `
+      <div class="exec-log-chain" data-chain-id="${idx}">
+        <div class="exec-log-summary" onclick="toggleChainDetail(${idx})">
+          <span class="exec-log-time">${time}</span>
+          <span class="exec-log-role orchestrator">${escapeHtml(orchestratorLog.agent_name)}</span>
+          <span class="exec-log-stage">${escapeHtml(orchestratorLog.stage || '-')}</span>
+          <span class="exec-log-status ${statusColor}">${orchestratorLog.status}</span>
+          ${orchestratorLog.latency_ms ? `<span class="exec-log-latency">${orchestratorLog.latency_ms}ms</span>` : ''}
+          ${expertLogs.length > 0 ? `<span class="exec-log-expert-count">+${expertLogs.length} 专家</span>` : ''}
+        </div>
+        <div class="exec-chain-detail" id="chain-detail-${idx}" style="display:${isExpanded ? 'block' : 'none'};">
+          <div class="log-detail-section">
+            <div class="log-detail-label orchestrator-label"><svg width="14" height="14"><use href="#icon-sparkle"/></svg> ${escapeHtml(orchestratorLog.agent_name)} (编排器)</div>
+            <div class="log-meta">阶段: ${escapeHtml(orchestratorLog.stage || '-')} | 状态: ${orchestratorLog.status} | 耗时: ${orchestratorLog.latency_ms || 0}ms</div>
+            ${orchestratorLog.input_text ? `<div class="log-io-block"><div class="log-io-label">输入上下文</div><pre>${escapeHtml(orchestratorLog.input_text?.substring(0, 600) || '')}</pre></div>` : ''}
+            ${orchestratorLog.output_text ? `<div class="log-io-block"><div class="log-io-label">输出结果</div><pre>${escapeHtml(orchestratorLog.output_text?.substring(0, 600) || '')}</pre></div>` : ''}
+            ${orchestratorLog.error_message ? `<div class="log-io-block"><div class="log-io-label error"><svg width="14" height="14"><use href="#icon-xmark"/></svg> 错误</div><pre>${escapeHtml(orchestratorLog.error_message)}</pre></div>` : ''}
+          </div>
+          ${expertLogs.map(expert => `
+            <div class="log-detail-section expert-section">
+              <div class="log-detail-label expert-label"><svg width="14" height="14"><use href="#icon-gear"/></svg> ${escapeHtml(expert.agent_name)} (专家)</div>
+              <div class="log-meta">阶段: ${escapeHtml(expert.stage || '-')} | 状态: ${expert.status} | 耗时: ${expert.latency_ms || 0}ms</div>
+              ${expert.input_text ? `<div class="log-io-block"><div class="log-io-label">输入提示词</div><pre>${escapeHtml(expert.input_text?.substring(0, 600) || '')}</pre></div>` : ''}
+              ${expert.output_text ? `<div class="log-io-block"><div class="log-io-label">输出结果</div><pre>${escapeHtml(expert.output_text?.substring(0, 600) || '')}</pre></div>` : ''}
+              ${expert.error_message ? `<div class="log-io-block"><div class="log-io-label error"><svg width="14" height="14"><use href="#icon-xmark"/></svg> 错误</div><pre>${escapeHtml(expert.error_message)}</pre></div>` : ''}
+            </div>
+          `).join('')}
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function buildCallChains(logs) {
+  const sorted = [...logs].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+  const chains = [];
+  let currentChain = null;
+
+  for (const log of sorted) {
+    if (log.agent_role === 'orchestrator' || log.agent_name === 'planner') {
+      if (currentChain) chains.push(currentChain);
+      currentChain = { orchestrator: log, experts: [] };
+    } else if (currentChain) {
+      currentChain.experts.push(log);
+    } else {
+      currentChain = { orchestrator: log, experts: [] };
+      chains.push(currentChain);
+      currentChain = null;
+    }
+  }
+  if (currentChain) chains.push(currentChain);
+  return chains;
+}
+
+function toggleChainDetail(idx) {
+  const id = 'chain-' + idx;
+  const el = document.getElementById(`chain-detail-${idx}`);
+  if (!el) return;
+  const isVisible = el.style.display === 'block';
+  el.style.display = isVisible ? 'none' : 'block';
+  if (isVisible) {
+    expandedLogIds.delete(id);
+  } else {
+    expandedLogIds.add(id);
+  }
+}
+
+function escapeHtml(text) {
+  if (!text) return '';
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+setInterval(() => {
+  if (execLogsExpanded && currentSessionId) {
+    refreshExecLogs();
+  }
+}, 5000);
+</script>
+{% endblock %}
