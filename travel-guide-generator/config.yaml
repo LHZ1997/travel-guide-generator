@@ -1,7 +1,7 @@
 llm:
   planner:
     api_base: https://api.deepseek.com
-    api_key: sk-a78e50da755244dea590f1d386172d21
+    api_key: sk-
     max_tokens: 4096
     model: deepseek-v4-pro
     provider: openai-compatible
@@ -11,7 +11,7 @@ llm:
     timeout: 60
   orchestrator:
     api_base: https://api.deepseek.com
-    api_key: sk-a78e50da755244dea590f1d386172d21
+    api_key: sk-
     max_tokens: 8192
     model: deepseek-v4-pro
     provider: openai-compatible
@@ -21,7 +21,7 @@ llm:
     timeout: 120
   checker:
     api_base: https://api.deepseek.com
-    api_key: sk-9f0c8443fe804923ba0e3997cedd7a42
+    api_key: sk-
     max_tokens: 4096
     model: deepseek-v4-pro
     provider: openai-compatible
